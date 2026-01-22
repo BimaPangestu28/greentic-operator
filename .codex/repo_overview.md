@@ -1,0 +1,201 @@
+# Repository Overview
+
+## 1. High-Level Purpose
+- Rust CLI for `greentic-operator` that orchestrates dev/demo workflows: project layout init, gmap policy management, resolved manifest generation, demo bundle builds, domain-aware provider lifecycle flows, and local runtime orchestration.
+- Includes dev-mode binary resolution (per-config and global persistent settings), secrets passthrough, and CI/publish automation scripts.
+
+## 2. Main Components and Functionality
+- **Path:** `src/main.rs`
+  - **Role:** Binary entrypoint.
+  - **Key functionality:** Parses CLI args and dispatches command execution.
+  - **Key dependencies / integration points:** `clap` for argument parsing.
+- **Path:** `src/cli.rs`
+  - **Role:** CLI definitions and command routing.
+  - **Key functionality:** Implements `dev init/scan/sync`, `dev setup/diagnostics/verify/doctor`, `dev secrets`, `dev on/off/status/map/detect`, `dev up/down/svc-status/logs`, `demo build/up/down/status/logs/doctor`, and gmap `allow/forbid` with hybrid dev-mode binary resolution.
+  - **Key dependencies / integration points:** Calls into `project`, `gmap`, `domains`, `doctor`, `bin_resolver`, and secrets tooling.
+- **Path:** `src/cli/dev_secrets.rs`
+  - **Role:** Secrets passthrough CLI.
+  - **Key functionality:** Provides `dev secrets init/set/get/list/delete` with tenant/team/env context and exit code passthrough.
+  - **Key dependencies / integration points:** Calls `tools::secrets` to invoke `greentic-secrets`.
+- **Path:** `src/cli/dev_mode_cmd.rs`
+  - **Role:** Global dev-mode CLI.
+  - **Key functionality:** Persists dev-mode settings (`dev on/off/status`) and manages repo map entries (`dev map set/rm/ls`).
+  - **Key dependencies / integration points:** Writes to `settings.yaml` via `settings`.
+- **Path:** `src/settings.rs`
+  - **Role:** Global operator settings persistence.
+  - **Key functionality:** Loads/saves settings under OS config dirs (or `GREENTIC_OPERATOR_CONFIG_DIR`), stores dev-mode root/profile/target dir/repo map.
+  - **Key dependencies / integration points:** Uses `directories-next` and `serde_yaml_bw`.
+- **Path:** `src/cloudflared.rs`
+  - **Role:** Cloudflared quick-tunnel manager.
+  - **Key functionality:** Spawns cloudflared via supervisor, discovers public URL from logs, and persists `public_base_url.txt` under runtime state.
+  - **Key dependencies / integration points:** Uses `supervisor` and `runtime_state`.
+- **Path:** `src/providers.rs`
+  - **Role:** Provider setup orchestration.
+  - **Key functionality:** Runs secrets init and provider pack setup/verify flows via runner, writes setup/verify/status output under runtime state.
+  - **Key dependencies / integration points:** Uses `runner_integration`, `tools::secrets`, and `runtime_state`.
+- **Path:** `src/runner_integration.rs`
+  - **Role:** Runner CLI wrapper.
+  - **Key functionality:** Shells out to `greentic-runner run` with pack/flow/input and captures output.
+- **Path:** `src/project/layout.rs`
+  - **Role:** Project skeleton creation.
+  - **Key functionality:** Creates directory layout under a project root; writes default `greentic.yaml` and `tenants/default/tenant.gmap` with `_ = forbidden`.
+  - **Key dependencies / integration points:** Uses filesystem helpers from `project/mod.rs`.
+- **Path:** `src/project/scan.rs`
+  - **Role:** Discovery and reporting.
+  - **Key functionality:** Scans providers, packs, and tenants/teams; renders human summary or JSON/YAML report.
+  - **Key dependencies / integration points:** Uses `serde` for structured output.
+- **Path:** `src/project/resolve.rs`
+  - **Role:** Manifest resolution.
+  - **Key functionality:** Generates `state/resolved/<tenant>[.<team>].yaml` manifests with providers, packs, and policy source paths.
+  - **Key dependencies / integration points:** Uses `serde_yaml_bw` and filesystem scanning.
+- **Path:** `src/config.rs`
+  - **Role:** Operator config loader.
+  - **Key functionality:** Parses `greentic.yaml` for runtime commands, dev-mode defaults, explicit binary overrides, demo service config (`DemoConfig`), and provider setup config entries.
+  - **Key dependencies / integration points:** Uses `serde_yaml_bw` and `dev_mode`.
+- **Path:** `src/dev_mode.rs`
+  - **Role:** Dev-mode resolution settings.
+  - **Key functionality:** Merges CLI overrides with config/global settings to determine active dev-mode settings and paths.
+  - **Key dependencies / integration points:** Used by CLI when resolving binaries.
+- **Path:** `src/dev_detect.rs`
+  - **Role:** Workspace binary detector.
+  - **Key functionality:** Scans workspace roots for built binaries, tracks ambiguities, and merges repo_map entries with PATH-aware rules.
+  - **Key dependencies / integration points:** Used by `dev on` and `dev detect`.
+- **Path:** `src/bin_resolver.rs`
+  - **Role:** Binary resolution helper.
+  - **Key functionality:** Resolves executable paths via explicit config overrides, dev-root mapping, local `bin/`/`target/`, and `$PATH`.
+  - **Key dependencies / integration points:** Used by CLI before spawning external binaries.
+- **Path:** `src/project/tenants.rs`
+  - **Role:** Tenant/team management.
+  - **Key functionality:** Adds/removes/list tenants and teams, initializes default gmaps.
+  - **Key dependencies / integration points:** Uses filesystem layout under `tenants/`.
+- **Path:** `src/domains/mod.rs`
+  - **Role:** Domain mapping and provider discovery.
+  - **Key functionality:** Maps messaging/events/secrets flows, discovers provider packs, parses pack manifests, and builds execution plans.
+  - **Key dependencies / integration points:** Reads `.gtpack` files via `zip`, uses `serde_json` for pack manifests.
+- **Path:** `src/doctor.rs`
+  - **Role:** Domain-aware validation gate.
+  - **Key functionality:** Runs `greentic-pack doctor` with optional validators, writes run logs and summaries under `state/doctor`.
+  - **Key dependencies / integration points:** Uses `greentic-pack` CLI, domain validators, and resolved manifests.
+- **Path:** `src/runner_exec.rs`
+  - **Role:** Runner execution wrapper.
+  - **Key functionality:** Runs provider pack flows via `greentic-runner-desktop`, writes run JSON/summary/artifacts pointers.
+  - **Key dependencies / integration points:** `greentic-runner-desktop`, `state_layout`.
+- **Path:** `src/state_layout.rs`
+  - **Role:** State layout helpers.
+  - **Key functionality:** Computes `state/runs/<domain>/<pack>/<flow>/<timestamp>` directories and `state/logs/secrets/<action>-<timestamp>.log` paths.
+- **Path:** `src/runtime_state.rs`
+  - **Role:** Demo runtime state paths and JSON helpers.
+  - **Key functionality:** Builds per-tenant/team runtime/pids/logs/resolved directories and provides atomic JSON read/write helpers.
+- **Path:** `src/tools/secrets.rs`
+  - **Role:** Secrets CLI wrapper.
+  - **Key functionality:** Builds argv for `greentic-secrets`, resolves the binary from PATH or override, and streams output to console plus log files under `state/logs/secrets`.
+  - **Key dependencies / integration points:** Invokes `greentic-secrets` and uses `state_layout`.
+- **Path:** `src/supervisor.rs`
+  - **Role:** Process supervisor foundation.
+  - **Key functionality:** Spawns services with pid/log capture, writes resolved command JSON, checks running status, and stops services.
+  - **Key dependencies / integration points:** Uses `sysinfo` for process checks and `runtime_state` for layout.
+- **Path:** `src/demo/`
+  - **Role:** Demo bundle workflow.
+  - **Key functionality:** Builds demo bundles from resolved manifests, rewrites `project_root` to `./`, copies providers/packs/tenants (optionally only used providers), runs demo up with resolved binaries or config-driven services, orchestrates provider setup via runner, supports runtime-state demo down/status/logs, and supports demo doctor checks.
+  - **Key dependencies / integration points:** Uses `state/resolved` manifests and services runtime helpers.
+- **Path:** `src/services/`
+  - **Role:** Local runtime orchestration.
+  - **Key functionality:** Starts/stops NATS via Docker, launches greentic-messaging with explicit packs, manages pidfiles/logs, and tails logs.
+  - **Key dependencies / integration points:** Uses `docker`, resolved manifests, and `greentic.yaml` runtime config.
+- **Path:** `src/gmap/parse.rs`
+  - **Role:** gmap parsing.
+  - **Key functionality:** Parses line-oriented rules, ignores blanks/comments, validates paths and policies.
+  - **Key dependencies / integration points:** Produces `GmapRule` and `GmapPath` for evaluation/editing.
+- **Path:** `src/gmap/eval.rs`
+  - **Role:** gmap evaluation.
+  - **Key functionality:** Computes most-specific policy match and supports tenant/team overlay evaluation.
+  - **Key dependencies / integration points:** Uses specificity ranking for `_`, `pack/_`, `pack`, `pack/flow`, `pack/flow/node`.
+- **Path:** `src/gmap/edit.rs`
+  - **Role:** gmap editing.
+  - **Key functionality:** Upserts allow/forbid rules; preserves comments when present or rewrites canonical order otherwise.
+  - **Key dependencies / integration points:** Used by `dev allow`/`dev forbid`.
+- **Path:** `docs/domains/common.md`, `docs/domains/messaging.md`, `docs/domains/events.md`, `docs/domains/secrets.md`
+  - **Role:** Domain interop contracts.
+  - **Key functionality:** Documents provider pack layouts, lifecycle flows, input payloads, and expectations per domain.
+  - **Key dependencies / integration points:** Guides domain repo behavior and operator compatibility.
+- **Path:** `tests/demo_build.rs`, `tests/doctor.rs`, `tests/domains.rs`, `tests/gmap_eval.rs`, `tests/gmap_edit.rs`, `tests/resolve_manifest.rs`
+  - **Role:** gmap, resolve, demo, domain, and doctor tests.
+  - **Key functionality:** Validates precedence/overlay, deterministic edits, resolved manifests, demo bundles, domain pack discovery/plan logic, and doctor command args/validator lookup.
+  - **Key dependencies / integration points:** Uses `tempfile` for isolated file tests.
+- **Path:** `tests/settings_persistence.rs`, `tests/bin_resolver_dev_mode.rs`, `tests/bin_resolver_global_dev_mode.rs`, `tests/bin_resolver_hybrid.rs`
+  - **Role:** Dev-mode and settings tests.
+  - **Key functionality:** Validates global settings persistence plus hybrid dev-mode binary resolution.
+  - **Key dependencies / integration points:** Uses `tempfile` and `bin_resolver`.
+- **Path:** `tests/dev_detect.rs`
+  - **Role:** Detection and merge tests.
+  - **Key functionality:** Validates repo_map detection, ambiguity handling, and merge rules.
+  - **Key dependencies / integration points:** Uses `dev_detect`.
+- **Path:** `tests/cloudflared_url_discovery.rs`, `tests/demo_up_smoke.rs`
+  - **Role:** Cloudflared discovery test.
+  - **Key functionality:** Starts a fake cloudflared binary and verifies public URL detection/persistence; demo up smoke test starts fake gsm services from config.
+  - **Key dependencies / integration points:** Uses `RuntimePaths` and `cloudflared`.
+- **Path:** `tests/provider_setup_smoke.rs`
+  - **Role:** Provider setup smoke test.
+  - **Key functionality:** Runs provider setup/verify with a fake runner and ensures output files are written.
+  - **Key dependencies / integration points:** Uses `providers` and `runner_integration`.
+- **Path:** `tests/supervisor_smoke.rs`
+  - **Role:** Supervisor smoke test.
+  - **Key functionality:** Spawns a fake service, verifies pid/log creation and running status, then stops the service.
+  - **Key dependencies / integration points:** Uses `src/bin/fake_service.rs`.
+- **Path:** `src/services/runner.rs`
+  - **Role:** Process supervision.
+  - **Key functionality:** Starts/stops processes, manages pidfiles/logs, and includes a Unix-only runner test.
+  - **Key dependencies / integration points:** Uses `libc` for process signaling on Unix.
+- **Path:** `src/bin/fake_service.rs`
+  - **Role:** Test fixture binary.
+  - **Key functionality:** Prints a readiness line then sleeps for a short interval.
+- **Path:** `src/bin/fake_cloudflared.rs`
+  - **Role:** Test fixture binary.
+  - **Key functionality:** Emits a trycloudflare URL and stays alive briefly for log discovery tests.
+- **Path:** `src/bin/fake_gsm_gateway.rs`, `src/bin/fake_gsm_egress.rs`, `src/bin/fake_gsm_msgraph_subscriptions.rs`, `src/bin/fake_nats_server.rs`
+  - **Role:** Test fixture binaries.
+  - **Key functionality:** Emit a ready line and sleep for demo up smoke tests.
+- **Path:** `src/bin/fake_runner.rs`
+  - **Role:** Test fixture binary.
+  - **Key functionality:** Emits JSON output for provider setup tests.
+- **Path:** `ci/prepare_publish_workspace.sh`
+  - **Role:** Publish workspace preparation.
+  - **Key functionality:** Creates a temp workspace and removes `path =` dependencies for publishing; verifies no path deps remain.
+  - **Key dependencies / integration points:** Used by CI workflow and local checks.
+- **Path:** `ci/local_checks.sh`, `ci/local_check.sh`
+  - **Role:** Local CI validation.
+  - **Key functionality:** Runs fmt/clippy/test, validates publish prep + dry-run publish, and packages a host binstall artifact.
+  - **Key dependencies / integration points:** Uses `ci/prepare_publish_workspace.sh` and `ci/package_binstall.sh`.
+- **Path:** `ci/package_binstall.sh`
+  - **Role:** Artifact packaging.
+  - **Key functionality:** Builds a release binary for a target triple and packages it as tar.gz/zip.
+  - **Key dependencies / integration points:** Used by local checks and CI artifact job.
+- **Path:** `.github/workflows/publish.yml`
+  - **Role:** CI publish workflow.
+  - **Key functionality:** Parallel fmt/clippy/test gates; publish with path-dep stripping; build binstall artifacts in a matrix.
+  - **Key dependencies / integration points:** Uses cargo-binstall, `ci/prepare_publish_workspace.sh`, and `ci/package_binstall.sh`.
+- **Path:** `Cargo.toml`
+  - **Role:** Rust crate manifest.
+  - **Key functionality:** Declares dependencies (`anyhow`, `clap`, `serde`, `serde_json`, `serde_yaml_bw`, `greentic-runner-desktop`, `zip`, `directories-next`) and dev dependency `tempfile`.
+  - **Key dependencies / integration points:** Uses local path dependency for `greentic-runner-desktop`.
+- **Path:** `README.md`
+  - **Role:** User-facing overview and quickstart.
+  - **Key functionality:** Documents intended usage, dev/demo path dependency policy, and global dev-mode binary resolution.
+  - **Key dependencies / integration points:** N/A.
+- **Path:** `.codex/PR.md`
+  - **Role:** Product/PR specification.
+  - **Key functionality:** Defines intended CLI, modules, and PR split; not all optional items are implemented yet.
+  - **Key dependencies / integration points:** N/A.
+
+## 3. Work In Progress, TODOs, and Stubs
+- **Location:** `.codex/PR.md`
+  - **Status:** TODO
+  - **Short description:** Remaining optional items beyond OP-PR-07 and OP-PR-05 (if any) are not yet implemented.
+
+## 4. Broken, Failing, or Conflicting Areas
+- **Location:** Repo-wide
+  - **Evidence:** `ci/local_check.sh` completed successfully.
+  - **Likely cause / nature of issue:** N/A.
+
+## 5. Notes for Future Work
+- Integrate supervisor runtime state with actual demo service startup (OP-PR-11B/11C/11D/11E).

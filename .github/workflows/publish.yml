@@ -1,0 +1,154 @@
+name: publish
+
+on:
+  push:
+    branches:
+      - master
+  workflow_dispatch:
+
+concurrency:
+  group: publish-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  fmt:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+      - uses: cargo-bins/cargo-binstall@v1
+      - name: Install Greentic CLIs
+        run: cargo binstall -y greentic-pack
+      - name: Format
+        run: cargo fmt --check
+
+  clippy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+      - uses: cargo-bins/cargo-binstall@v1
+      - name: Install Greentic CLIs
+        run: cargo binstall -y greentic-pack
+      - name: Clippy
+        run: cargo clippy -- -D warnings
+
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+      - uses: cargo-bins/cargo-binstall@v1
+      - name: Install Greentic CLIs
+        run: cargo binstall -y greentic-pack
+      - name: Test
+        run: cargo test
+
+  publish-crates:
+    runs-on: ubuntu-latest
+    needs: [fmt, clippy, test]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+      - uses: cargo-bins/cargo-binstall@v1
+      - name: Install Greentic CLIs
+        run: cargo binstall -y greentic-pack
+      - name: Prepare publish workspace
+        id: prep
+        run: |
+          WORKSPACE="$(ci/prepare_publish_workspace.sh)"
+          echo "workspace=$WORKSPACE" >> "$GITHUB_OUTPUT"
+      - name: Publish crates
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: |
+          set -euo pipefail
+          cd "${{ steps.prep.outputs.workspace }}"
+          output="$(cargo publish --token "$CARGO_REGISTRY_TOKEN" 2>&1 || true)"
+          if echo "$output" | rg -q "already uploaded|version .* is already in use"; then
+            echo "$output"
+            exit 0
+          fi
+          if echo "$output" | rg -q "error"; then
+            echo "$output" >&2
+            exit 1
+          fi
+          echo "$output"
+
+  binstall-artifacts:
+    runs-on: ${{ matrix.os }}
+    needs: [fmt, clippy, test]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-15
+            target: aarch64-apple-darwin
+          - os: macos-15
+            target: x86_64-apple-darwin
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+      - uses: cargo-bins/cargo-binstall@v1
+      - name: Install Greentic CLIs
+        run: cargo binstall -y greentic-pack
+      - name: Build and package
+        run: |
+          mkdir -p dist
+          if [[ "${{ matrix.target }}" == "x86_64-apple-darwin" ]]; then
+            echo "Cross-building x86_64 macOS artifact on macos-15 runner."
+          fi
+          ci/package_binstall.sh --target "${{ matrix.target }}" --out dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: greentic-operator-${{ matrix.target }}
+          path: dist/*
