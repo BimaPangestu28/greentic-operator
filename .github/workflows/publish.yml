@@ -29,7 +29,9 @@ jobs:
             ~/.cargo/binstall
             target
           key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
-      - uses: cargo-bins/cargo-binstall@v1.6.2
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-binstall@1.6.2
       - name: Install Greentic CLIs
         run: cargo binstall -y greentic-pack
       - name: Format
@@ -51,11 +53,9 @@ jobs:
             ~/.cargo/git
             target
           key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
-      - uses: cargo-bins/cargo-binstall@v1.6.2
-        if: runner.os != 'Windows'
-      - name: Install cargo-binstall (Windows)
-        if: runner.os == 'Windows'
-        run: cargo install --locked cargo-binstall
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-binstall@1.6.2
       - name: Install Greentic CLIs
         run: cargo binstall -y greentic-pack
       - name: Clippy
@@ -77,7 +77,9 @@ jobs:
             ~/.cargo/git
             target
           key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
-      - uses: cargo-bins/cargo-binstall@v1.6.2
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-binstall@1.6.2
       - name: Install Greentic CLIs
         run: cargo binstall -y greentic-pack
       - name: Test
@@ -100,7 +102,9 @@ jobs:
             ~/.cargo/git
             target
           key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
-      - uses: cargo-bins/cargo-binstall@v1.6.2
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-binstall@1.6.2
       - name: Install Greentic CLIs
         run: cargo binstall -y greentic-pack
       - name: Prepare publish workspace
@@ -154,7 +158,9 @@ jobs:
             ~/.cargo/git
             target
           key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
-      - uses: cargo-bins/cargo-binstall@v1.6.2
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-binstall@1.6.2
       - name: Install Greentic CLIs
         run: cargo binstall -y greentic-pack
       - name: Build and package
