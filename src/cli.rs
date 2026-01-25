@@ -1232,7 +1232,11 @@ impl DemoUpArgs {
             let config = config::load_operator_config(&bundle)?;
             let dev_settings =
                 resolve_dev_settings(&ctx.settings, config.as_ref(), &self.dev, &bundle)?;
-            let discovery = discovery::discover(&bundle)?;
+            domains::ensure_cbor_packs(&bundle)?;
+            let discovery = discovery::discover_with_options(
+                &bundle,
+                discovery::DiscoveryOptions { cbor_only: true },
+            )?;
             discovery::persist(&bundle, &tenant, &discovery)?;
             let services = config
                 .as_ref()
@@ -1353,7 +1357,11 @@ impl DemoUpArgs {
 
 impl DemoSetupArgs {
     fn run(self) -> anyhow::Result<()> {
-        let discovery = discovery::discover(&self.bundle)?;
+        domains::ensure_cbor_packs(&self.bundle)?;
+        let discovery = discovery::discover_with_options(
+            &self.bundle,
+            discovery::DiscoveryOptions { cbor_only: true },
+        )?;
         discovery::persist(&self.bundle, &self.tenant, &discovery)?;
         let domains: Vec<Domain> = match self.domain {
             DemoSetupDomainArg::Messaging => vec![Domain::Messaging],
@@ -1440,6 +1448,7 @@ impl DemoSendArgs {
         } else {
             Some(self.team.as_str())
         };
+        domains::ensure_cbor_packs(&self.bundle)?;
         let pack = resolve_demo_provider_pack(
             &self.bundle,
             &self.tenant,
@@ -1447,7 +1456,10 @@ impl DemoSendArgs {
             &self.provider,
             Domain::Messaging,
         )?;
-        let discovery = discovery::discover(&self.bundle)?;
+        let discovery = discovery::discover_with_options(
+            &self.bundle,
+            discovery::DiscoveryOptions { cbor_only: true },
+        )?;
         let provider_map = discovery_map(&discovery.providers);
         let provider_id = provider_id_for_pack(&pack.path, &pack.pack_id, Some(&provider_map));
 
@@ -1778,8 +1790,12 @@ fn resolve_demo_provider_pack(
     provider: &str,
     domain: Domain,
 ) -> anyhow::Result<domains::ProviderPack> {
-    let mut packs = domains::discover_provider_packs(root, domain)?;
     let is_demo_bundle = root.join("greentic.demo.yaml").exists();
+    let mut packs = if is_demo_bundle {
+        domains::discover_provider_packs_cbor_only(root, domain)?
+    } else {
+        domains::discover_provider_packs(root, domain)?
+    };
     if is_demo_bundle && let Some(allowed) = demo_provider_files(root, tenant, team, domain)? {
         packs.retain(|pack| allowed.contains(&pack.file_name));
     }
@@ -1882,7 +1898,11 @@ struct DomainRunArgs {
 
 fn run_domain_command(args: DomainRunArgs) -> anyhow::Result<()> {
     let is_demo_bundle = args.root.join("greentic.demo.yaml").exists();
-    let mut packs = domains::discover_provider_packs(&args.root, args.domain)?;
+    let mut packs = if is_demo_bundle {
+        domains::discover_provider_packs_cbor_only(&args.root, args.domain)?
+    } else {
+        domains::discover_provider_packs(&args.root, args.domain)?
+    };
     let provider_map = args.discovered_providers.as_ref().map(|providers| {
         let mut map = std::collections::BTreeMap::new();
         for provider in providers {

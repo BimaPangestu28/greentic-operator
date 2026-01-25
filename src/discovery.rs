@@ -33,7 +33,19 @@ pub enum ProviderIdSource {
     Filename,
 }
 
+#[derive(Default)]
+pub struct DiscoveryOptions {
+    pub cbor_only: bool,
+}
+
 pub fn discover(root: &Path) -> anyhow::Result<DiscoveryResult> {
+    discover_with_options(root, DiscoveryOptions::default())
+}
+
+pub fn discover_with_options(
+    root: &Path,
+    options: DiscoveryOptions,
+) -> anyhow::Result<DiscoveryResult> {
     let mut providers = Vec::new();
     for domain in [Domain::Messaging, Domain::Events] {
         let cfg = domains::config(domain);
@@ -50,7 +62,11 @@ pub fn discover(root: &Path) -> anyhow::Result<DiscoveryResult> {
             if path.extension().and_then(|ext| ext.to_str()) != Some("gtpack") {
                 continue;
             }
-            let (provider_id, id_source) = match read_pack_id_from_manifest(&path)? {
+            let (provider_id, id_source) = match if options.cbor_only {
+                read_pack_id_from_manifest_cbor_only(&path)?
+            } else {
+                read_pack_id_from_manifest(&path)?
+            } {
                 Some(pack_id) => (pack_id, ProviderIdSource::Manifest),
                 None => {
                     let stem = path
@@ -91,24 +107,63 @@ pub fn persist(root: &Path, tenant: &str, discovery: &DiscoveryResult) -> anyhow
 fn read_pack_id_from_manifest(path: &Path) -> anyhow::Result<Option<String>> {
     let file = std::fs::File::open(path)?;
     let mut archive = zip::ZipArchive::new(file)?;
-    let manifest = match archive.by_name("pack.manifest.json") {
-        Ok(mut file) => {
-            let mut contents = String::new();
-            std::io::Read::read_to_string(&mut file, &mut contents)?;
-            Some(contents)
-        }
-        Err(ZipError::FileNotFound) => None,
-        Err(err) => return Err(err.into()),
-    };
-    let Some(manifest) = manifest else {
-        return Ok(None);
-    };
-    let parsed: domains::PackManifestForDiscovery = serde_json::from_str(&manifest)?;
+    if let Some(parsed) = read_manifest_cbor_for_discovery(&mut archive)? {
+        return extract_pack_id(parsed);
+    }
+    if let Some(parsed) = read_manifest_json_for_discovery(&mut archive, "pack.manifest.json")? {
+        return extract_pack_id(parsed);
+    }
+    Ok(None)
+}
+
+fn read_pack_id_from_manifest_cbor_only(path: &Path) -> anyhow::Result<Option<String>> {
+    let file = std::fs::File::open(path)?;
+    let mut archive = zip::ZipArchive::new(file)?;
+    if let Some(parsed) = read_manifest_cbor_for_discovery(&mut archive)? {
+        return extract_pack_id(parsed);
+    }
+    Err(missing_cbor_error(path))
+}
+
+fn extract_pack_id(parsed: domains::PackManifestForDiscovery) -> anyhow::Result<Option<String>> {
     if let Some(meta) = parsed.meta {
         return Ok(Some(meta.pack_id));
     }
-    if let Some(name) = parsed.name {
-        return Ok(Some(name));
-    }
     Ok(None)
+}
+
+fn read_manifest_cbor_for_discovery(
+    archive: &mut zip::ZipArchive<std::fs::File>,
+) -> anyhow::Result<Option<domains::PackManifestForDiscovery>> {
+    let mut file = match archive.by_name("manifest.cbor") {
+        Ok(file) => file,
+        Err(ZipError::FileNotFound) => return Ok(None),
+        Err(err) => return Err(err.into()),
+    };
+    let mut bytes = Vec::new();
+    std::io::Read::read_to_end(&mut file, &mut bytes)?;
+    let parsed: domains::PackManifestForDiscovery = serde_cbor::from_slice(&bytes)?;
+    Ok(Some(parsed))
+}
+
+fn read_manifest_json_for_discovery(
+    archive: &mut zip::ZipArchive<std::fs::File>,
+    name: &str,
+) -> anyhow::Result<Option<domains::PackManifestForDiscovery>> {
+    let mut file = match archive.by_name(name) {
+        Ok(file) => file,
+        Err(ZipError::FileNotFound) => return Ok(None),
+        Err(err) => return Err(err.into()),
+    };
+    let mut contents = String::new();
+    std::io::Read::read_to_string(&mut file, &mut contents)?;
+    let parsed: domains::PackManifestForDiscovery = serde_json::from_str(&contents)?;
+    Ok(Some(parsed))
+}
+
+fn missing_cbor_error(path: &Path) -> anyhow::Error {
+    anyhow::anyhow!(
+        "ERROR: demo packs must be CBOR-only (.gtpack must contain manifest.cbor). Rebuild the pack with greentic-pack build (do not use --dev). Missing in {}",
+        path.display()
+    )
 }

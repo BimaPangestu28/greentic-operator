@@ -15,9 +15,9 @@ Scope: operator-side behavior for messaging provider packs and messaging runtime
   - `--allow-missing-setup` and `--best-effort` to skip missing `setup_default` flows instead of failing fast (`src/domains/mod.rs`, `src/cli.rs`).
 
 ## Provider metadata consumption
-- Pack manifest file: `pack.manifest.json` inside the `.gtpack` (zip) archive.
+- Pack manifest file: `manifest.cbor` is required for demo bundles; non-demo discovery still accepts `pack.manifest.json` as a fallback inside the `.gtpack` (zip) archive.
 - Pack identity:
-  - `meta.pack_id` preferred; otherwise `name` field; if neither, discovery falls back to filename stem (`src/domains/mod.rs`, `src/discovery.rs`).
+  - `meta.pack_id` required; if missing, discovery falls back to filename stem (`src/domains/mod.rs`, `src/discovery.rs`).
 - Entry flows:
   - `meta.entry_flows` if present; otherwise derived from `flows[*].id` and `flows[*].entrypoints` (`src/domains/mod.rs`).
   - If still empty, pack_id is used as a fallback entry flow (`src/domains/mod.rs`).

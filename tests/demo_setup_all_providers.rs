@@ -5,14 +5,15 @@ fn write_pack(path: &std::path::Path, pack_id: &str, entry_flows: &[&str]) -> an
     let file = std::fs::File::create(path)?;
     let mut zip = zip::ZipWriter::new(file);
     let options = zip::write::FileOptions::<()>::default();
-    zip.start_file("pack.manifest.json", options)?;
+    zip.start_file("manifest.cbor", options)?;
     let manifest = serde_json::json!({
         "meta": {
             "pack_id": pack_id,
             "entry_flows": entry_flows,
         }
     });
-    std::io::Write::write_all(&mut zip, serde_json::to_string(&manifest)?.as_bytes())?;
+    let bytes = serde_cbor::to_vec(&manifest)?;
+    std::io::Write::write_all(&mut zip, &bytes)?;
     zip.finish()?;
     Ok(())
 }

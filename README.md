@@ -41,6 +41,7 @@ Demo bundles
 
 greentic-operator demo build --out demo-bundle --tenant tenant1 --team team1
 greentic-operator demo up --bundle demo-bundle --tenant tenant1 --team team1
+Note: demo bundles require CBOR-only packs (`manifest.cbor`). Rebuild packs with `greentic-pack build` (avoid `--dev`).
 
 Demo send (generic)
 

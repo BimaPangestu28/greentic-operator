@@ -1,6 +1,7 @@
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
+use zip::result::ZipError;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Domain {
@@ -71,6 +72,47 @@ pub fn validator_pack_path(root: &Path, domain: Domain) -> Option<PathBuf> {
     if path.exists() { Some(path) } else { None }
 }
 
+pub fn ensure_cbor_packs(root: &Path) -> anyhow::Result<()> {
+    let mut roots = Vec::new();
+    let providers = root.join("providers");
+    if providers.exists() {
+        roots.push(providers);
+    }
+    let packs = root.join("packs");
+    if packs.exists() {
+        roots.push(packs);
+    }
+    for root in roots {
+        for pack in collect_gtpacks(&root)? {
+            let file = std::fs::File::open(&pack)?;
+            let mut archive = zip::ZipArchive::new(file)?;
+            if read_manifest_cbor(&mut archive)?.is_none() {
+                return Err(missing_cbor_error(&pack));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn collect_gtpacks(root: &Path) -> anyhow::Result<Vec<PathBuf>> {
+    let mut packs = Vec::new();
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        for entry in std::fs::read_dir(&dir)? {
+            let entry = entry?;
+            let path = entry.path();
+            if entry.file_type()?.is_dir() {
+                stack.push(path);
+                continue;
+            }
+            if path.extension().and_then(|ext| ext.to_str()) == Some("gtpack") {
+                packs.push(path);
+            }
+        }
+    }
+    Ok(packs)
+}
+
 pub fn discover_provider_packs(root: &Path, domain: Domain) -> anyhow::Result<Vec<ProviderPack>> {
     let cfg = config(domain);
     let providers_dir = root.join(cfg.providers_dir);
@@ -89,6 +131,41 @@ pub fn discover_provider_packs(root: &Path, domain: Domain) -> anyhow::Result<Ve
         }
         let file_name = entry.file_name().to_string_lossy().to_string();
         let manifest = read_pack_manifest(&path)?;
+        let meta = manifest
+            .meta
+            .ok_or_else(|| anyhow::anyhow!("pack manifest missing meta"))?;
+        packs.push(ProviderPack {
+            pack_id: meta.pack_id,
+            file_name,
+            path,
+            entry_flows: meta.entry_flows,
+        });
+    }
+    packs.sort_by(|a, b| a.file_name.cmp(&b.file_name));
+    Ok(packs)
+}
+
+pub fn discover_provider_packs_cbor_only(
+    root: &Path,
+    domain: Domain,
+) -> anyhow::Result<Vec<ProviderPack>> {
+    let cfg = config(domain);
+    let providers_dir = root.join(cfg.providers_dir);
+    let mut packs = Vec::new();
+    if !providers_dir.exists() {
+        return Ok(packs);
+    }
+    for entry in std::fs::read_dir(&providers_dir)? {
+        let entry = entry?;
+        if !entry.file_type()?.is_file() {
+            continue;
+        }
+        let path = entry.path();
+        if path.extension().and_then(|ext| ext.to_str()) != Some("gtpack") {
+            continue;
+        }
+        let file_name = entry.file_name().to_string_lossy().to_string();
+        let manifest = read_pack_manifest_cbor_only(&path)?;
         let meta = manifest
             .meta
             .ok_or_else(|| anyhow::anyhow!("pack manifest missing meta"))?;
@@ -164,16 +241,12 @@ pub fn plan_runs(
 pub(crate) struct PackManifestForDiscovery {
     #[serde(default)]
     pub meta: Option<PackMeta>,
-    #[serde(default)]
-    pub name: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
 struct PackManifest {
     #[serde(default)]
     meta: Option<PackMeta>,
-    #[serde(default)]
-    name: Option<String>,
     #[serde(default)]
     flows: Vec<PackFlow>,
 }
@@ -195,17 +268,21 @@ struct PackFlow {
 fn read_pack_manifest(path: &Path) -> anyhow::Result<PackManifest> {
     let file = std::fs::File::open(path)?;
     let mut archive = zip::ZipArchive::new(file)?;
-    let mut manifest = archive.by_name("pack.manifest.json")?;
-    let mut contents = String::new();
-    std::io::Read::read_to_string(&mut manifest, &mut contents)?;
-    let manifest: PackManifest = serde_json::from_str(&contents)?;
+    let manifest = read_pack_manifest_data(&mut archive, path)?;
     let pack_id = if let Some(meta) = manifest.meta.as_ref() {
         meta.pack_id.clone()
     } else {
-        manifest
-            .name
-            .clone()
-            .ok_or_else(|| anyhow::anyhow!("pack.manifest.json missing pack id/name"))?
+        let fallback = path
+            .file_stem()
+            .and_then(|value| value.to_str())
+            .unwrap_or("pack")
+            .to_string();
+        eprintln!(
+            "Warning: pack manifest missing pack id; using filename '{}' for {}",
+            fallback,
+            path.display()
+        );
+        fallback
     };
     let mut entry_flows = if let Some(meta) = manifest.meta.as_ref() {
         meta.entry_flows.clone()
@@ -228,9 +305,73 @@ fn read_pack_manifest(path: &Path) -> anyhow::Result<PackManifest> {
             pack_id,
             entry_flows,
         }),
-        name: None,
         flows: Vec::new(),
     })
+}
+
+fn read_pack_manifest_cbor_only(path: &Path) -> anyhow::Result<PackManifest> {
+    let file = std::fs::File::open(path)?;
+    let mut archive = zip::ZipArchive::new(file)?;
+    match read_manifest_cbor(&mut archive)? {
+        Some(manifest) => Ok(manifest),
+        None => Err(missing_cbor_error(path)),
+    }
+}
+
+fn read_pack_manifest_data(
+    archive: &mut zip::ZipArchive<std::fs::File>,
+    path: &Path,
+) -> anyhow::Result<PackManifest> {
+    match read_manifest_cbor(archive) {
+        Ok(Some(manifest)) => return Ok(manifest),
+        Ok(None) => {}
+        Err(err) => return Err(err),
+    }
+    match read_manifest_json(archive, "pack.manifest.json") {
+        Ok(Some(manifest)) => return Ok(manifest),
+        Ok(None) => {}
+        Err(err) => return Err(err),
+    }
+    Err(anyhow::anyhow!(
+        "pack manifest not found in archive {} (expected manifest.cbor or pack.manifest.json)",
+        path.display()
+    ))
+}
+
+fn read_manifest_cbor(
+    archive: &mut zip::ZipArchive<std::fs::File>,
+) -> anyhow::Result<Option<PackManifest>> {
+    let mut file = match archive.by_name("manifest.cbor") {
+        Ok(file) => file,
+        Err(ZipError::FileNotFound) => return Ok(None),
+        Err(err) => return Err(err.into()),
+    };
+    let mut bytes = Vec::new();
+    std::io::Read::read_to_end(&mut file, &mut bytes)?;
+    let manifest: PackManifest = serde_cbor::from_slice(&bytes)?;
+    Ok(Some(manifest))
+}
+
+fn read_manifest_json(
+    archive: &mut zip::ZipArchive<std::fs::File>,
+    name: &str,
+) -> anyhow::Result<Option<PackManifest>> {
+    let mut file = match archive.by_name(name) {
+        Ok(file) => file,
+        Err(ZipError::FileNotFound) => return Ok(None),
+        Err(err) => return Err(err.into()),
+    };
+    let mut contents = String::new();
+    std::io::Read::read_to_string(&mut file, &mut contents)?;
+    let manifest: PackManifest = serde_json::from_str(&contents)?;
+    Ok(Some(manifest))
+}
+
+fn missing_cbor_error(path: &Path) -> anyhow::Error {
+    anyhow::anyhow!(
+        "ERROR: demo packs must be CBOR-only (.gtpack must contain manifest.cbor). Rebuild the pack with greentic-pack build (do not use --dev). Missing in {}",
+        path.display()
+    )
 }
 
 pub(crate) fn domain_name(domain: Domain) -> &'static str {

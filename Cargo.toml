@@ -1,6 +1,6 @@
 [package]
 name = "greentic-operator"
-version = "0.4.4"
+version = "0.4.5"
 edition = "2024"
 rust-version = "1.90"
 description = "Greentic operator CLI for local dev and demo orchestration."
@@ -13,6 +13,7 @@ clap = { version = "4.5", features = ["derive"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 serde_yaml_bw = "2"
+serde_cbor = "0.11"
 libc = "0.2"
 zip = "7"
 chrono = "0.4"

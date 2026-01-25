@@ -30,6 +30,19 @@ fn write_pack_without_manifest(path: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
+fn write_pack_with_name_only(path: &Path, name: &str) -> anyhow::Result<()> {
+    let file = File::create(path)?;
+    let mut zip = zip::ZipWriter::new(file);
+    let options = zip::write::FileOptions::<()>::default();
+    zip.start_file("pack.manifest.json", options)?;
+    let manifest = serde_json::json!({
+        "name": name
+    });
+    zip.write_all(serde_json::to_string(&manifest)?.as_bytes())?;
+    zip.finish()?;
+    Ok(())
+}
+
 #[test]
 fn discovery_detects_domains_and_manifest_ids() {
     let temp = tempfile::tempdir().unwrap();
@@ -86,4 +99,33 @@ fn discovery_persists_outputs() {
     let providers: serde_json::Value = serde_json::from_str(&providers).unwrap();
     assert_eq!(domains["messaging"], true);
     assert_eq!(providers.as_array().unwrap().len(), 1);
+}
+
+#[test]
+fn discovery_ignores_name_only_manifest() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    let messaging = root.join("providers").join("messaging");
+    std::fs::create_dir_all(&messaging).unwrap();
+
+    write_pack_with_name_only(&messaging.join("fallback.gtpack"), "ignored").unwrap();
+
+    let result = discovery::discover(root).unwrap();
+    assert_eq!(result.providers.len(), 1);
+    assert_eq!(result.providers[0].provider_id, "fallback");
+    assert_eq!(result.providers[0].id_source, ProviderIdSource::Filename);
+}
+
+#[test]
+fn discovery_cbor_only_rejects_json_manifest() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    let messaging = root.join("providers").join("messaging");
+    std::fs::create_dir_all(&messaging).unwrap();
+    write_pack(&messaging.join("alpha.gtpack"), "messaging-alpha").unwrap();
+
+    let err =
+        discovery::discover_with_options(root, discovery::DiscoveryOptions { cbor_only: true })
+            .unwrap_err();
+    assert!(err.to_string().contains("demo packs must be CBOR-only"));
 }
