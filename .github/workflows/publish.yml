@@ -10,6 +10,10 @@ concurrency:
   group: publish-${{ github.ref }}
   cancel-in-progress: false
 
+defaults:
+  run:
+    shell: bash
+
 jobs:
   fmt:
     runs-on: ubuntu-latest
