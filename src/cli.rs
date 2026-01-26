@@ -1474,28 +1474,27 @@ impl DemoUpArgs {
             let mut public_base_url = self.public_base_url.clone();
             let team_id = self.team.clone().unwrap_or_else(|| "default".to_string());
             let mut started_cloudflared_early = false;
-            if public_base_url.is_none() && self.setup_input.is_some() {
-                if let Some(cfg) = cloudflared_config.as_mut() {
-                    let paths = RuntimePaths::new(&bundle.join("state"), &tenant, &team_id);
-                    let handle = crate::cloudflared::start_quick_tunnel(&paths, cfg)?;
-                    let domain_labels = domains_to_setup
-                        .iter()
-                        .map(|domain| domains::domain_name(*domain))
-                        .collect::<Vec<_>>()
-                        .join(",");
-                    println!(
-                        "Public URL (cloudflared setup domains={domain_labels}): {}",
-                        handle.url
-                    );
-                    public_base_url = Some(handle.url.clone());
-                    started_cloudflared_early = true;
-                }
+            if public_base_url.is_none()
+                && self.setup_input.is_some()
+                && let Some(cfg) = cloudflared_config.as_mut()
+            {
+                let paths = RuntimePaths::new(bundle.join("state"), &tenant, &team_id);
+                let handle = crate::cloudflared::start_quick_tunnel(&paths, cfg)?;
+                let domain_labels = domains_to_setup
+                    .iter()
+                    .map(|domain| domains::domain_name(*domain))
+                    .collect::<Vec<_>>()
+                    .join(",");
+                println!(
+                    "Public URL (cloudflared setup domains={domain_labels}): {}",
+                    handle.url
+                );
+                public_base_url = Some(handle.url.clone());
+                started_cloudflared_early = true;
             }
 
-            if started_cloudflared_early {
-                if let Some(cfg) = cloudflared_config.as_mut() {
-                    cfg.restart = false;
-                }
+            if started_cloudflared_early && let Some(cfg) = cloudflared_config.as_mut() {
+                cfg.restart = false;
             }
 
             if let Some(setup_input) = self.setup_input.as_ref() {
@@ -1907,6 +1906,7 @@ fn demo_debug_enabled() -> bool {
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run_demo_up_setup(
     bundle: &Path,
     domains: &[Domain],
@@ -2507,40 +2507,41 @@ fn run_plan_item(
         .map(|value| value.to_string())
         .unwrap_or_else(crate::tools::secrets::resolve_env);
 
-    if domain == Domain::Messaging && action == DomainAction::Setup {
-        if let Some(manager) = secrets_manager.as_ref() {
-            match secrets_gate::check_provider_secrets(
-                manager,
-                &env_value,
-                tenant,
-                team,
-                &item.pack.path,
-                &provider_id,
-            ) {
-                Ok(Some(missing)) => {
-                    let formatted = missing
-                        .iter()
-                        .map(|entry| format!("  - {entry}"))
-                        .collect::<Vec<_>>()
-                        .join("\n");
-                    println!(
-                        "[warn] skip setup domain={} tenant={} provider={}: missing secrets:\n{formatted}",
-                        domains::domain_name(domain),
-                        tenant,
-                        provider_id
-                    );
-                    return Ok(());
-                }
-                Ok(None) => {}
-                Err(err) => {
-                    println!(
-                        "[warn] skip setup domain={} tenant={} provider={}: secrets check failed: {err}",
-                        domains::domain_name(domain),
-                        tenant,
-                        provider_id
-                    );
-                    return Ok(());
-                }
+    if domain == Domain::Messaging
+        && action == DomainAction::Setup
+        && let Some(manager) = secrets_manager.as_ref()
+    {
+        match secrets_gate::check_provider_secrets(
+            manager,
+            &env_value,
+            tenant,
+            team,
+            &item.pack.path,
+            &provider_id,
+        ) {
+            Ok(Some(missing)) => {
+                let formatted = missing
+                    .iter()
+                    .map(|entry| format!("  - {entry}"))
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                println!(
+                    "[warn] skip setup domain={} tenant={} provider={}: missing secrets:\n{formatted}",
+                    domains::domain_name(domain),
+                    tenant,
+                    provider_id
+                );
+                return Ok(());
+            }
+            Ok(None) => {}
+            Err(err) => {
+                println!(
+                    "[warn] skip setup domain={} tenant={} provider={}: secrets check failed: {err}",
+                    domains::domain_name(domain),
+                    tenant,
+                    provider_id
+                );
+                return Ok(());
             }
         }
     }
@@ -2853,6 +2854,7 @@ fn looks_like_path_str(value: &str) -> bool {
     value.contains('/') || value.contains('\\') || Path::new(value).is_absolute()
 }
 
+#[allow(clippy::too_many_arguments)]
 fn build_input_payload(
     root: &Path,
     domain: Domain,

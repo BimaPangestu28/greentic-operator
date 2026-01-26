@@ -125,12 +125,11 @@ fn extract_keys_from_manifest_map(map: &CborMap) -> anyhow::Result<Vec<String>> 
                 if !is_required(entry_map) {
                     continue;
                 }
-                if let Some(key_value) = map_get(entry_map, "key") {
-                    if let Some(key) =
+                if let Some(key_value) = map_get(entry_map, "key")
+                    && let Some(key) =
                         resolve_string_symbol(Some(key_value), symbols, "secret_requirements")?
-                    {
-                        keys.push(key.to_lowercase());
-                    }
+                {
+                    keys.push(key.to_lowercase());
                 }
             }
         }
@@ -191,10 +190,10 @@ fn symbol_array<'a>(symbols: &'a CborMap, key: &'a str) -> Option<&'a Vec<CborVa
     if let Some(CborValue::Array(values)) = map_get(symbols, key) {
         return Some(values);
     }
-    if let Some(stripped) = key.strip_suffix('s') {
-        if let Some(CborValue::Array(values)) = map_get(symbols, stripped) {
-            return Some(values);
-        }
+    if let Some(stripped) = key.strip_suffix('s')
+        && let Some(CborValue::Array(values)) = map_get(symbols, stripped)
+    {
+        return Some(values);
     }
     None
 }

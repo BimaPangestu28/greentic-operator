@@ -108,10 +108,10 @@ fn read_tenants(dir: &Path) -> anyhow::Result<Option<Vec<String>>> {
             }
             continue;
         }
-        if path.is_file() {
-            if let Some(stem) = path.file_stem().and_then(|value| value.to_str()) {
-                tenants.insert(stem.to_string());
-            }
+        if path.is_file()
+            && let Some(stem) = path.file_stem().and_then(|value| value.to_str())
+        {
+            tenants.insert(stem.to_string());
         }
     }
     let tenants = tenants.into_iter().collect();
