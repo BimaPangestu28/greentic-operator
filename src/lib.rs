@@ -1,4 +1,5 @@
 pub mod bin_resolver;
+pub mod cards;
 pub mod cli;
 pub mod cloudflared;
 pub mod config;

@@ -2,6 +2,7 @@ use std::{
     collections::BTreeSet,
     env, fs,
     io::Write,
+    net::SocketAddr,
     path::{Path, PathBuf},
     sync::Arc,
 };
@@ -13,12 +14,14 @@ use serde_json::{Map as JsonMap, Value as JsonValue, json};
 
 use base64::{Engine as _, engine::general_purpose};
 use clap::{Parser, Subcommand, ValueEnum};
-use greentic_runner_desktop::RunStatus;
-use gsm_core::{PROVIDER_ID_KEY, ingress_subject};
+use gsm_core::{PROVIDER_ID_KEY, ingress_subject_with_prefix};
+use tokio::runtime::Runtime;
 use tokio::sync::Mutex;
 
 use crate::bin_resolver::{self, ResolveCtx};
 use crate::config;
+use crate::demo::http_ingress::{HttpIngressConfig, HttpIngressServer};
+use crate::demo::runner_host::{DemoRunnerHost, OperatorContext};
 use crate::demo::setup::{ProvidersInput, discover_tenants};
 use crate::demo::{self, BuildOptions};
 use crate::dev_mode::{
@@ -55,6 +58,7 @@ pub struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    #[command(hide = true)]
     Dev(DevCommand),
     Demo(DemoCommand),
 }
@@ -87,11 +91,15 @@ enum DevSubcommand {
     Team(TeamCommand),
     Allow(DevPolicyArgs),
     Forbid(DevPolicyArgs),
+    #[command(hide = true)]
     Up(DevUpArgs),
+    #[command(hide = true)]
     Embedded(DevEmbeddedArgs),
+    #[command(hide = true)]
     Down(DevDownArgs),
-    #[command(name = "svc-status")]
+    #[command(name = "svc-status", hide = true)]
     SvcStatus(DevStatusArgs),
+    #[command(hide = true)]
     Logs(DevLogsArgs),
     Setup(DomainSetupArgs),
     Diagnostics(DomainDiagnosticsArgs),
@@ -103,11 +111,13 @@ enum DevSubcommand {
 #[derive(Subcommand)]
 enum DemoSubcommand {
     Build(DemoBuildArgs),
+    Start(DemoUpArgs),
     Up(DemoUpArgs),
     Setup(DemoSetupArgs),
     Send(DemoSendArgs),
     Receive(DemoReceiveArgs),
     New(DemoNewArgs),
+    Stop(DemoDownArgs),
     Down(DemoDownArgs),
     Status(DemoStatusArgs),
     Logs(DemoLogsArgs),
@@ -492,7 +502,7 @@ enum RestartTarget {
 #[command(
     about = "Build a portable demo bundle.",
     long_about = "Copies packs/providers/tenants and writes resolved manifests under the output directory.",
-    after_help = "Main options:\n  --out <DIR>\n\nOptional options:\n  --tenant <TENANT>\n  --team <TEAM>\n  --allow-pack-dirs\n  --only-used-providers\n  --doctor\n  --project-root <PATH> (default: current directory)\n  --dev-mode <auto|on|off>\n  --dev-root <PATH>\n  --dev-profile <debug|release>\n  --dev-target-dir <PATH>"
+    after_help = "Main options:\n  --out <DIR>\n\nOptional options:\n  --tenant <TENANT>\n  --team <TEAM>\n  --allow-pack-dirs\n  --only-used-providers\n  --doctor\n  --skip-doctor\n  --project-root <PATH> (default: current directory)\n  --dev-mode <auto|on|off>\n  --dev-root <PATH>\n  --dev-profile <debug|release>\n  --dev-target-dir <PATH>"
 )]
 struct DemoBuildArgs {
     #[arg(long)]
@@ -507,6 +517,8 @@ struct DemoBuildArgs {
     only_used_providers: bool,
     #[arg(long)]
     doctor: bool,
+    #[arg(long)]
+    skip_doctor: bool,
     #[arg(long)]
     project_root: Option<PathBuf>,
     #[command(flatten)]
@@ -526,10 +538,13 @@ struct DemoUpArgs {
     )]
     bundle: Option<PathBuf>,
     #[arg(
-        long,
-        default_value = "messaging",
+        long = "domains",
+        alias = "domain",
+        value_enum,
+        value_delimiter = ',',
+        default_value = "all",
         help_heading = "Optional options",
-        help = "Domain(s) to operate on (messaging, events, secrets, all)."
+        help = "Domain(s) to operate on (messaging, events, secrets, all); defaults to auto-detect from the bundle."
     )]
     domain: DemoSetupDomainArg,
     #[arg(
@@ -559,9 +574,19 @@ struct DemoUpArgs {
     #[arg(
         long,
         help_heading = "Optional options",
-        help = "Skip spawning local NATS (used when you already have one)."
+        help = "Legacy flag (sets --nats=external) still honored for compatibility.",
+        hide = true,
+        conflicts_with = "nats"
     )]
     no_nats: bool,
+    #[arg(
+        long = "nats",
+        value_enum,
+        default_value_t = NatsModeArg::Off,
+        help_heading = "Optional options",
+        help = "Selects the NATS mode: off (default), on (legacy local NATS), or external (explicit URL)."
+    )]
+    nats: NatsModeArg,
     #[arg(
         long,
         help_heading = "Optional options",
@@ -664,7 +689,15 @@ enum DemoSetupDomainArg {
     Messaging,
     Events,
     Secrets,
+    #[value(alias = "auto")]
     All,
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum NatsModeArg {
+    Off,
+    On,
+    External,
 }
 
 impl DemoSetupDomainArg {
@@ -688,6 +721,16 @@ impl DemoSetupDomainArg {
                 enabled.push(Domain::Secrets);
                 enabled
             }
+        }
+    }
+}
+
+impl From<NatsModeArg> for demo::NatsMode {
+    fn from(value: NatsModeArg) -> Self {
+        match value {
+            NatsModeArg::Off => demo::NatsMode::Off,
+            NatsModeArg::On => demo::NatsMode::On,
+            NatsModeArg::External => demo::NatsMode::External,
         }
     }
 }
@@ -738,8 +781,8 @@ struct DemoSetupArgs {
 #[derive(Parser)]
 #[command(
     about = "Allow/forbid a gmap rule inside a demo bundle.",
-    long_about = "Updates the demo bundle's gmap, reruns the resolver, and copies the updated manifest so demo up sees the change immediately.",
-    after_help = "Main options:\n  --bundle <DIR>\n  --tenant <TENANT>\n  --path <PACK[/FLOW[/NODE]] (up to 3 segments)\n\nOptional options:\n  --team <TEAM>\n\nPaths use the same PACK[/FLOW[/NODE]] syntax as the dev allow/forbid commands (max 3 segments). The command modifies tenants/<tenant>[/teams/<team>]/(tenant|team).gmap, resolves state/resolved/<tenant>[.<team>].yaml, and overwrites resolved/<tenant>[.<team>].yaml so demo up picks it up without a rebuild."
+    long_about = "Updates the demo bundle's gmap, reruns the resolver, and copies the updated manifest so demo start sees the change immediately.",
+    after_help = "Main options:\n  --bundle <DIR>\n  --tenant <TENANT>\n  --path <PACK[/FLOW[/NODE]] (up to 3 segments)\n\nOptional options:\n  --team <TEAM>\n\nPaths use the same PACK[/FLOW[/NODE]] syntax as the dev allow/forbid commands (max 3 segments). The command modifies tenants/<tenant>[/teams/<team>]/(tenant|team).gmap, resolves state/resolved/<tenant>[.<team>].yaml, and overwrites resolved/<tenant>[.<team>].yaml so demo start picks it up without a rebuild."
 )]
 struct DemoPolicyArgs {
     #[arg(long, help = "Path to the demo bundle directory.")]
@@ -856,13 +899,15 @@ struct DemoSendArgs {
     team: String,
     #[arg(long)]
     print_required_args: bool,
+    #[arg(long)]
+    runner_binary: Option<PathBuf>,
 }
 
 #[derive(Parser)]
 #[command(
     about = "Stream inbound messaging ingress events from a demo bundle.",
-    long_about = "Subscribes to the bundle's messaging ingress subjects, prints each event, and appends the same data to incoming.log.",
-    after_help = "Main options:\n  --bundle <DIR> --provider <PROVIDER>|--all --tenant <TENANT> --team <TEAM>\n\nOptional options:\n  --nats-url <URL> (default: nats://127.0.0.1:4222)"
+    long_about = "Subscribes to the bundle's domain-specific ingress subjects, prints each event, and appends the same data to incoming.log.",
+    after_help = "Main options:\n  --bundle <DIR> --provider <PROVIDER>|--all --tenant <TENANT> --team <TEAM>\n\nOptional options:\n  --domain <messaging|events> (default: messaging)\n  --nats-url <URL> (default: nats://127.0.0.1:4222)"
 )]
 struct DemoReceiveArgs {
     #[arg(long)]
@@ -873,10 +918,19 @@ struct DemoReceiveArgs {
     all: bool,
     #[arg(long)]
     nats_url: Option<String>,
+    #[arg(
+        long,
+        value_enum,
+        default_value_t = DomainArg::Messaging,
+        help = "Domain for the ingress subject (messaging or events)."
+    )]
+    domain: DomainArg,
     #[arg(long, default_value = "demo")]
     tenant: String,
     #[arg(long, default_value = "default")]
     team: String,
+    #[arg(long)]
+    runner_binary: Option<PathBuf>,
 }
 
 #[derive(Parser)]
@@ -956,6 +1010,13 @@ struct AppCtx {
 }
 
 impl DevCommand {
+    fn warn_legacy_gsm(command: &str) {
+        eprintln!(
+            "Warning: '{}' is a legacy GSM path; use the demo commands instead. This command will be removed in a future release.",
+            command
+        );
+    }
+
     fn run(self, ctx: &mut AppCtx) -> anyhow::Result<()> {
         match self.command {
             DevSubcommand::On(args) => {
@@ -985,11 +1046,26 @@ impl DevCommand {
             DevSubcommand::Team(args) => args.run(),
             DevSubcommand::Allow(args) => args.run(Policy::Public),
             DevSubcommand::Forbid(args) => args.run(Policy::Forbidden),
-            DevSubcommand::Up(args) => args.run(ctx),
-            DevSubcommand::Embedded(args) => args.run(ctx),
-            DevSubcommand::Down(args) => args.run(),
-            DevSubcommand::SvcStatus(args) => args.run(),
-            DevSubcommand::Logs(args) => args.run(),
+            DevSubcommand::Up(args) => {
+                Self::warn_legacy_gsm("greentic-operator dev up");
+                args.run(ctx)
+            }
+            DevSubcommand::Embedded(args) => {
+                Self::warn_legacy_gsm("greentic-operator dev embedded");
+                args.run(ctx)
+            }
+            DevSubcommand::Down(args) => {
+                Self::warn_legacy_gsm("greentic-operator dev down");
+                args.run()
+            }
+            DevSubcommand::SvcStatus(args) => {
+                Self::warn_legacy_gsm("greentic-operator dev svc-status");
+                args.run()
+            }
+            DevSubcommand::Logs(args) => {
+                Self::warn_legacy_gsm("greentic-operator dev logs");
+                args.run()
+            }
             DevSubcommand::Setup(args) => args.run(),
             DevSubcommand::Diagnostics(args) => args.run(),
             DevSubcommand::Verify(args) => args.run(),
@@ -1008,12 +1084,20 @@ impl DemoCommand {
         }
         match self.command {
             DemoSubcommand::Build(args) => args.run(ctx),
-            DemoSubcommand::Up(args) => args.run(ctx),
+            DemoSubcommand::Start(args) => args.run_start(ctx),
+            DemoSubcommand::Up(args) => {
+                eprintln!("Warning: 'demo up' is deprecated; use 'demo start'.");
+                args.run(ctx)
+            }
             DemoSubcommand::Setup(args) => args.run(),
             DemoSubcommand::Send(args) => args.run(),
             DemoSubcommand::Receive(args) => args.run(),
             DemoSubcommand::New(args) => args.run(),
-            DemoSubcommand::Down(args) => args.run(),
+            DemoSubcommand::Stop(args) => args.run(),
+            DemoSubcommand::Down(args) => {
+                eprintln!("Warning: 'demo down' is deprecated; use 'demo stop'.");
+                args.run()
+            }
             DemoSubcommand::Status(args) => args.run(),
             DemoSubcommand::Logs(args) => args.run(),
             DemoSubcommand::Doctor(args) => args.run(ctx),
@@ -1452,13 +1536,21 @@ impl DemoBuildArgs {
                 self.doctor
             );
         }
+        let env_skip_doctor = std::env::var("GREENTIC_OPERATOR_SKIP_DOCTOR").is_ok();
+        let skip_doctor = self.skip_doctor || env_skip_doctor;
+        let run_doctor = self.doctor || !skip_doctor;
+        if demo_debug_enabled() && skip_doctor {
+            println!(
+                "[demo] skipping doctor gate (skip_doctor flag or GREENTIC_OPERATOR_SKIP_DOCTOR set)"
+            );
+        }
         let options = BuildOptions {
             out_dir: self.out,
             tenant: self.tenant,
             team: self.team,
             allow_pack_dirs: self.allow_pack_dirs,
             only_used_providers: self.only_used_providers,
-            run_doctor: self.doctor,
+            run_doctor,
         };
         let config = config::load_operator_config(&root)?;
         let dev_settings = resolve_dev_settings(&ctx.settings, config.as_ref(), &self.dev, &root)?;
@@ -1480,7 +1572,15 @@ impl DemoBuildArgs {
 }
 
 impl DemoUpArgs {
+    fn run_start(self, ctx: &AppCtx) -> anyhow::Result<()> {
+        self.run_with_shutdown(ctx, true)
+    }
+
     fn run(self, ctx: &AppCtx) -> anyhow::Result<()> {
+        self.run_with_shutdown(ctx, false)
+    }
+
+    fn run_with_shutdown(self, ctx: &AppCtx, wait_for_ctrlc_flag: bool) -> anyhow::Result<()> {
         let restart: std::collections::BTreeSet<String> =
             self.restart.iter().map(restart_name).collect();
         let log_level = if self.quiet {
@@ -1490,26 +1590,42 @@ impl DemoUpArgs {
         } else {
             operator_log::Level::Info
         };
+        let command_label = if wait_for_ctrlc_flag {
+            "demo start"
+        } else {
+            "demo up"
+        };
         if let Some(bundle) = self.bundle.clone() {
+            let state_dir = bundle.join("state");
             let log_dir = self.log_dir.clone().unwrap_or_else(|| bundle.join("logs"));
             let log_dir = operator_log::init(log_dir.clone(), log_level)?;
             operator_log::info(
                 module_path!(),
                 format!(
-                    "demo up (bundle={} tenant={:?} team={:?}) log_dir={}",
+                    "{command_label} (bundle={} tenant={:?} team={:?}) log_dir={}",
                     bundle.display(),
                     self.tenant,
                     self.team,
                     log_dir.display()
                 ),
             );
+            let mut nats_mode_arg = self.nats;
+            if self.no_nats {
+                nats_mode_arg = NatsModeArg::External;
+            }
+            let nats_mode = demo::NatsMode::from(nats_mode_arg);
+            if matches!(nats_mode, demo::NatsMode::On) {
+                eprintln!(
+                    "Warning: '--nats=on' uses the legacy GSM NATS stack; switch to embedded mode when possible."
+                );
+            }
             if demo_debug_enabled() {
                 println!(
-                    "[demo] up bundle={} tenant={:?} team={:?} no_nats={} nats_url={:?} cloudflared={:?}",
+                    "[demo] up bundle={} tenant={:?} team={:?} nats_mode={:?} nats_url={:?} cloudflared={:?}",
                     bundle.display(),
                     self.tenant,
                     self.team,
-                    self.no_nats,
+                    nats_mode,
                     self.nats_url,
                     self.cloudflared
                 );
@@ -1535,6 +1651,8 @@ impl DemoUpArgs {
                     discovery.providers.len()
                 ),
             );
+            let demo_config_path = bundle.join("greentic.demo.yaml");
+            let demo_config = load_demo_config_or_default(&demo_config_path);
             let services = config
                 .as_ref()
                 .and_then(|config| config.services.clone())
@@ -1549,17 +1667,7 @@ impl DemoUpArgs {
             } else {
                 Vec::new()
             };
-            let bundle_nats_url = crate::services::nats_url(&bundle);
             let explicit_nats_url = self.nats_url.clone();
-            let nats_url_arg = if self.no_nats {
-                Some(
-                    explicit_nats_url
-                        .as_deref()
-                        .unwrap_or(bundle_nats_url.as_str()),
-                )
-            } else {
-                explicit_nats_url.as_deref()
-            };
             let domains_to_setup = self.domain.resolve_domains(Some(&discovery));
 
             let mut cloudflared_config = match self.cloudflared {
@@ -1590,7 +1698,7 @@ impl DemoUpArgs {
                 && self.setup_input.is_some()
                 && let Some(cfg) = cloudflared_config.as_mut()
             {
-                let paths = RuntimePaths::new(bundle.join("state"), &tenant, &team_id);
+                let paths = RuntimePaths::new(&state_dir, &tenant, &team_id);
                 let setup_log = operator_log::reserve_service_log(&log_dir, "cloudflared")
                     .with_context(|| "unable to open cloudflared.log")?;
                 operator_log::info(
@@ -1645,37 +1753,78 @@ impl DemoUpArgs {
                 &bundle,
                 &tenant,
                 self.team.as_deref(),
-                nats_url_arg,
-                self.no_nats,
+                explicit_nats_url.as_deref(),
+                nats_mode,
                 messaging_enabled,
                 cloudflared_config,
                 events_components,
                 &log_dir,
             );
+            let mut ingress_server = None;
+            if wait_for_ctrlc_flag && result.is_ok() {
+                match start_demo_ingress_server(
+                    &bundle,
+                    &discovery,
+                    &demo_config,
+                    &domains_to_setup,
+                    self.runner_binary.clone(),
+                ) {
+                    Ok(server) => {
+                        println!(
+                            "HTTP ingress ready at http://{}:{}",
+                            demo_config.services.gateway.listen_addr,
+                            demo_config.services.gateway.port
+                        );
+                        ingress_server = Some(server);
+                    }
+                    Err(err) => {
+                        eprintln!("Warning: HTTP ingress disabled: {err}");
+                        operator_log::warn(
+                            module_path!(),
+                            format!("demo ingress server unavailable: {err}"),
+                        );
+                    }
+                }
+            }
             if let Err(ref err) = result {
                 operator_log::error(
                     module_path!(),
-                    format!("demo up bundle {} failed: {err}", bundle.display()),
+                    format!("{command_label} bundle {} failed: {err}", bundle.display()),
                 );
             } else {
                 operator_log::info(
                     module_path!(),
-                    format!("demo up bundle {} completed", bundle.display()),
+                    format!("{command_label} bundle {} completed", bundle.display()),
                 );
+            }
+            if wait_for_ctrlc_flag && result.is_ok() {
+                println!(
+                    "{command_label} running (bundle={} tenant={} team={}); press Ctrl+C to stop",
+                    bundle.display(),
+                    tenant,
+                    team_id
+                );
+                wait_for_ctrlc()?;
+                if let Some(server) = ingress_server.take() {
+                    server.stop()?;
+                }
+                demo::demo_down_runtime(&state_dir, &tenant, &team_id, false)?;
             }
             return result;
         }
 
         let config_path = resolve_demo_config_path(self.config.clone())?;
+        let config_dir = config_path.parent().unwrap_or(Path::new(".")).to_path_buf();
+        let state_dir = config_dir.join("state");
         let initial_log_dir = self
             .log_dir
             .clone()
-            .unwrap_or_else(|| config_path.parent().unwrap_or(Path::new(".")).join("logs"));
+            .unwrap_or_else(|| config_dir.join("logs"));
         let log_dir = operator_log::init(initial_log_dir.clone(), log_level)?;
         operator_log::info(
             module_path!(),
             format!(
-                "demo up (config={}) tenant={:?} team={:?} log_dir={}",
+                "{command_label} (config={}) tenant={:?} team={:?} log_dir={}",
                 config_path.display(),
                 self.tenant,
                 self.team,
@@ -1683,13 +1832,14 @@ impl DemoUpArgs {
             ),
         );
         let demo_config = config::load_demo_config(&config_path)?;
-        let operator_config =
-            config::load_operator_config(config_path.parent().unwrap_or(Path::new(".")))?;
+        let tenant = demo_config.tenant.clone();
+        let team = demo_config.team.clone();
+        let operator_config = config::load_operator_config(&config_dir)?;
         let dev_settings = resolve_dev_settings(
             &ctx.settings,
             operator_config.as_ref(),
             &self.dev,
-            config_path.parent().unwrap_or(Path::new(".")),
+            &config_dir,
         )?;
         let cloudflared = match self.cloudflared {
             CloudflaredModeArg::Off => None,
@@ -1698,7 +1848,7 @@ impl DemoUpArgs {
                 let binary = bin_resolver::resolve_binary(
                     "cloudflared",
                     &ResolveCtx {
-                        config_dir: config_path.parent().unwrap_or(Path::new(".")).to_path_buf(),
+                        config_dir: config_dir.clone(),
                         dev: None,
                         explicit_path: explicit,
                     },
@@ -1738,9 +1888,22 @@ impl DemoUpArgs {
             &log_dir,
         );
         if let Err(ref err) = result {
-            operator_log::error(module_path!(), format!("demo up services failed: {err}"));
+            operator_log::error(
+                module_path!(),
+                format!("{command_label} services failed: {err}"),
+            );
         } else {
-            operator_log::info(module_path!(), "demo up services completed");
+            operator_log::info(module_path!(), "{command_label} services completed");
+        }
+        if wait_for_ctrlc_flag && result.is_ok() {
+            println!(
+                "{command_label} running (config={} tenant={} team={}); press Ctrl+C to stop",
+                config_path.display(),
+                tenant,
+                team
+            );
+            wait_for_ctrlc()?;
+            demo::demo_down_runtime(&state_dir, &tenant, &team, false)?;
         }
         result
     }
@@ -1854,6 +2017,18 @@ impl DemoSendArgs {
         let provider_map = discovery_map(&discovery.providers);
         let provider_id = provider_id_for_pack(&pack.path, &pack.pack_id, Some(&provider_map));
 
+        let runner_host = DemoRunnerHost::new(
+            self.bundle.clone(),
+            &discovery,
+            self.runner_binary.clone(),
+            secrets_gate::default_manager(),
+        )?;
+        let context = OperatorContext {
+            tenant: self.tenant.clone(),
+            team: team.map(|value| value.to_string()),
+            correlation_id: None,
+        };
+
         if self.print_required_args {
             if let Err(message) = ensure_requirements_flow(&pack) {
                 eprintln!("{message}");
@@ -1870,15 +2045,13 @@ impl DemoSendArgs {
                 None,
                 &env,
             );
-            let outcome = run_demo_flow(
-                &self.bundle,
+            let input_bytes = serde_json::to_vec(&input)?;
+            let outcome = runner_host.invoke_provider_op(
                 Domain::Messaging,
-                &self.tenant,
-                team,
-                &pack,
+                &provider_id,
                 "requirements",
-                &input,
-                None,
+                &input_bytes,
+                &context,
             )?;
             if !outcome.success {
                 let message = outcome
@@ -1914,15 +2087,13 @@ impl DemoSendArgs {
             payload["team"] = JsonValue::String(team.to_string());
         }
 
-        let outcome = run_demo_flow(
-            &self.bundle,
+        let payload_bytes = serde_json::to_vec(&payload)?;
+        let outcome = runner_host.invoke_provider_op(
             Domain::Messaging,
-            &self.tenant,
-            team,
-            &pack,
+            &provider_id,
             "send",
-            &payload,
-            None,
+            &payload_bytes,
+            &context,
         )?;
         if outcome.success {
             println!("ok");
@@ -1959,34 +2130,20 @@ impl DemoReceiveArgs {
             .map(|info| info.provider_id.clone())
             .collect::<BTreeSet<_>>();
         let filter_active = self.provider.is_some();
-        let env = crate::tools::secrets::resolve_env();
-        let team_name = team.unwrap_or("default");
-        let subject_filter = ingress_subject_filter(&env, &self.tenant, team_name);
-        let provider_list = selected
-            .iter()
-            .map(|info| info.provider_id.as_str())
-            .collect::<Vec<_>>()
-            .join(", ");
-        let log_path = PathBuf::from("incoming.log");
-        let file = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&log_path)?;
-        let log_writer = Arc::new(Mutex::new(std::io::BufWriter::new(file)));
-
-        println!("listening for inbound messages on {}", subject_filter);
-        println!("providers: {}", provider_list);
-        println!("logging to {}", log_path.display());
-
-        let nats_urls = resolve_receive_nats_urls(self.nats_url.clone());
+        let log_dir = resolve_log_dir(None, self.bundle.as_ref());
+        std::fs::create_dir_all(&log_dir)?;
+        let log_path = log_dir.join("incoming.log");
+        println!("listening for inbound events via {}", log_path.display());
+        println!(
+            "providers: {}",
+            selected
+                .iter()
+                .map(|info| info.provider_id.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
         let runtime = tokio::runtime::Runtime::new()?;
-        runtime.block_on(run_demo_receive_async(
-            nats_urls,
-            subject_filter,
-            provider_ids,
-            filter_active,
-            log_writer,
-        ))?;
+        runtime.block_on(run_demo_receive_async(log_path, provider_ids, filter_active))?;
         Ok(())
     }
 }
@@ -2075,20 +2232,13 @@ fn select_demo_providers(
     }
 }
 
-fn ingress_subject_filter(env: &str, tenant: &str, team: &str) -> String {
-    let base = ingress_subject(env, tenant, team, "__provider__");
+fn ingress_subject_filter(env: &str, tenant: &str, team: &str, domain: Domain) -> String {
+    let prefix = format!("greentic.{}.ingress", domains::domain_name(domain));
+    let base = ingress_subject_with_prefix(&prefix, env, tenant, team, "__provider__");
     if let Some(pos) = base.rfind('.') {
         format!("{}.*", &base[..pos])
     } else {
         format!("{}.*", base)
-    }
-}
-
-fn resolve_receive_nats_urls(explicit: Option<String>) -> Vec<String> {
-    if let Some(url) = explicit {
-        vec![url]
-    } else {
-        vec![config::default_receive_nats_url()]
     }
 }
 
@@ -2120,6 +2270,9 @@ async fn run_demo_receive_async(
     provider_ids: BTreeSet<String>,
     filter_active: bool,
     log_writer: Arc<Mutex<std::io::BufWriter<std::fs::File>>>,
+    runner_host: Arc<DemoRunnerHost>,
+    domain: Domain,
+    context: OperatorContext,
 ) -> anyhow::Result<()> {
     let (client, connected_url) = connect_to_nats(&nats_urls).await?;
     let mut subscription = client.subscribe(subject_filter.clone()).await?;
@@ -2133,10 +2286,60 @@ async fn run_demo_receive_async(
                 break;
             }
             message = subscription.next() => match message {
-                Some(message) => {
+            Some(message) => {
                     let provider_name = provider_id_from_message(&message.payload);
                     if !should_log_message(provider_name.as_deref(), &provider_ids, filter_active) {
                         continue;
+                    }
+                    let provider = match provider_name.as_deref() {
+                        Some(name) => name,
+                        None => continue,
+                    };
+                    let flow_id = if runner_host.supports_op(domain, provider, "handle-webhook") {
+                        "handle-webhook"
+                    } else if runner_host.supports_op(domain, provider, "ingest") {
+                        "ingest"
+                    } else {
+                        println!(
+                            "[warn] provider {} has no ingress flows for domain {}",
+                            provider,
+                            domains::domain_name(domain)
+                        );
+                        continue;
+                    };
+                    let outcome = runner_host.invoke_provider_op(
+                        domain,
+                        provider,
+                        flow_id,
+                        message.payload.as_ref(),
+                        &context,
+                    );
+                    match outcome {
+                        Ok(outcome) if outcome.success => {
+                            if let Some(value) = outcome.output {
+                                println!("{}", serde_json::to_string_pretty(&value)?);
+                            } else if let Some(raw) = outcome.raw {
+                                println!("{raw}");
+                            } else {
+                                println!("{} {} -> success (no output)", provider, flow_id);
+                            }
+                        }
+                        Ok(outcome) => {
+                            println!(
+                                "[error] provider {} {} failed: {}",
+                                provider,
+                                flow_id,
+                                outcome
+                                    .error
+                                    .unwrap_or_else(|| "unknown error".to_string())
+                            );
+                        }
+                        Err(err) => {
+                            println!(
+                                "[error] provider {} {} invocation failed: {err}",
+                                provider, flow_id
+                            );
+                        }
                     }
                     let timestamp = Utc::now().to_rfc3339();
                     let payload_text = format_payload_display(&message.payload);
@@ -2246,6 +2449,9 @@ fn create_demo_bundle_structure(root: &Path) -> anyhow::Result<()> {
         "tenants",
         "tenants/default",
         "tenants/default/teams",
+        "tenants/demo",
+        "tenants/demo/teams",
+        "tenants/demo/teams/default",
         "logs",
     ];
     for directory in directories {
@@ -2256,7 +2462,63 @@ fn create_demo_bundle_structure(root: &Path) -> anyhow::Result<()> {
         &root.join("tenants").join("default").join("tenant.gmap"),
         DEFAULT_DEMO_GMAP,
     )?;
+    write_if_missing(
+        &root.join("tenants").join("demo").join("tenant.gmap"),
+        DEFAULT_DEMO_GMAP,
+    )?;
+    write_if_missing(
+        &root
+            .join("tenants")
+            .join("demo")
+            .join("teams")
+            .join("default")
+            .join("team.gmap"),
+        DEFAULT_DEMO_GMAP,
+    )?;
     Ok(())
+}
+
+fn load_demo_config_or_default(path: &Path) -> config::DemoConfig {
+    match config::load_demo_config(path) {
+        Ok(value) => value,
+        Err(err) => {
+            operator_log::warn(
+                module_path!(),
+                format!(
+                    "failed to load {}: {err}; using default values",
+                    path.display()
+                ),
+            );
+            config::DemoConfig::default()
+        }
+    }
+}
+
+fn start_demo_ingress_server(
+    bundle: &Path,
+    discovery: &discovery::DiscoveryResult,
+    demo_config: &config::DemoConfig,
+    domains: &[Domain],
+    runner_binary: Option<PathBuf>,
+) -> anyhow::Result<HttpIngressServer> {
+    let addr = format!(
+        "{}:{}",
+        demo_config.services.gateway.listen_addr, demo_config.services.gateway.port
+    );
+    let bind_addr: SocketAddr = addr
+        .parse()
+        .with_context(|| format!("invalid gateway listen address {addr}"))?;
+    let runner_host = Arc::new(DemoRunnerHost::new(
+        bundle.to_path_buf(),
+        discovery,
+        runner_binary,
+        secrets_gate::default_manager(),
+    )?);
+    HttpIngressServer::start(HttpIngressConfig {
+        bind_addr,
+        domains: domains.to_vec(),
+        runner_host,
+    })
 }
 
 fn ensure_dir(path: &Path) -> anyhow::Result<()> {
@@ -2302,6 +2564,15 @@ fn resolve_demo_config_path(explicit: Option<PathBuf>) -> anyhow::Result<PathBuf
     Err(anyhow::anyhow!(
         "no demo config found; pass --config or create ./demo/demo.yaml"
     ))
+}
+
+fn wait_for_ctrlc() -> anyhow::Result<()> {
+    let runtime = Runtime::new().context("failed to spawn runtime for Ctrl+C listener")?;
+    runtime.block_on(async {
+        tokio::signal::ctrl_c()
+            .await
+            .map_err(|err| anyhow::anyhow!("failed to wait for Ctrl+C: {err}"))
+    })
 }
 
 impl DemoDownArgs {
@@ -3635,109 +3906,6 @@ fn format_requirements_item(value: &JsonValue) -> String {
     serde_json::to_string(value).unwrap_or_else(|_| value.to_string())
 }
 
-struct FlowOutcome {
-    success: bool,
-    output: Option<JsonValue>,
-    raw: Option<String>,
-    error: Option<String>,
-}
-
-#[allow(clippy::too_many_arguments)]
-fn run_demo_flow(
-    root: &Path,
-    domain: Domain,
-    tenant: &str,
-    team: Option<&str>,
-    pack: &domains::ProviderPack,
-    flow_id: &str,
-    input: &JsonValue,
-    runner_binary: Option<&Path>,
-) -> anyhow::Result<FlowOutcome> {
-    let dist_offline = true;
-    if let Some(runner_binary) = runner_binary {
-        let run_dir = state_layout::run_dir(root, domain, &pack.pack_id, flow_id)?;
-        std::fs::create_dir_all(&run_dir)?;
-        let input_path = run_dir.join("input.json");
-        let input_json = serde_json::to_string_pretty(input)?;
-        std::fs::write(&input_path, input_json)?;
-
-        let runner_flavor = runner_integration::detect_runner_flavor(runner_binary);
-        let output = runner_integration::run_flow_with_options(
-            runner_binary,
-            &pack.path,
-            flow_id,
-            input,
-            runner_integration::RunFlowOptions {
-                dist_offline,
-                tenant: Some(tenant),
-                team,
-                artifacts_dir: Some(&run_dir),
-                runner_flavor,
-            },
-        )?;
-        write_runner_cli_artifacts(&run_dir, &output)?;
-        let mut parsed = output.parsed.clone();
-        if parsed.is_none() {
-            parsed = serde_json::from_str(&output.stdout).ok();
-        }
-        if parsed.is_none() {
-            parsed = read_transcript_outputs(&run_dir)?;
-        }
-        let error = summarize_runner_error(&output);
-        let raw = if output.stdout.trim().is_empty() {
-            None
-        } else {
-            Some(output.stdout.clone())
-        };
-        return Ok(FlowOutcome {
-            success: output.status.success(),
-            output: parsed,
-            raw,
-            error,
-        });
-    }
-
-    let output = runner_exec::run_provider_pack_flow(runner_exec::RunRequest {
-        root: root.to_path_buf(),
-        domain,
-        pack_path: pack.path.clone(),
-        pack_label: pack.pack_id.clone(),
-        flow_id: flow_id.to_string(),
-        tenant: tenant.to_string(),
-        team: team.map(|value| value.to_string()),
-        input: input.clone(),
-        dist_offline,
-    })?;
-    let parsed = read_transcript_outputs(&output.run_dir)?;
-    Ok(FlowOutcome {
-        success: output.result.status == RunStatus::Success,
-        output: parsed,
-        raw: None,
-        error: output.result.error.clone(),
-    })
-}
-
-fn read_transcript_outputs(run_dir: &Path) -> anyhow::Result<Option<JsonValue>> {
-    let path = run_dir.join("transcript.jsonl");
-    if !path.exists() {
-        return Ok(None);
-    }
-    let contents = std::fs::read_to_string(path)?;
-    let mut last = None;
-    for line in contents.lines() {
-        let Ok(value) = serde_json::from_str::<JsonValue>(line) else {
-            continue;
-        };
-        let Some(outputs) = value.get("outputs") else {
-            continue;
-        };
-        if !outputs.is_null() {
-            last = Some(outputs.clone());
-        }
-    }
-    Ok(last)
-}
-
 impl From<DomainArg> for Domain {
     fn from(value: DomainArg) -> Self {
         match value {
@@ -3855,8 +4023,10 @@ mod tests {
         let env = "dev env";
         let tenant = "acme tenant";
         let team = "team/with slash";
-        let filter = ingress_subject_filter(env, tenant, team);
-        let base = ingress_subject(env, tenant, team, "__provider__");
+        let domain = Domain::Messaging;
+        let filter = ingress_subject_filter(env, tenant, team, domain);
+        let prefix = format!("greentic.{}.ingress", domains::domain_name(domain));
+        let base = ingress_subject_with_prefix(&prefix, env, tenant, team, "__provider__");
         let expected = if let Some(pos) = base.rfind('.') {
             format!("{}.*", &base[..pos])
         } else {

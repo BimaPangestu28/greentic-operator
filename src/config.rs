@@ -98,6 +98,17 @@ pub struct DemoConfig {
     pub providers: Option<std::collections::BTreeMap<String, DemoProviderConfig>>,
 }
 
+impl Default for DemoConfig {
+    fn default() -> Self {
+        Self {
+            tenant: default_demo_tenant(),
+            team: default_demo_team(),
+            services: DemoServicesConfig::default(),
+            providers: None,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, Default)]
 pub struct DemoServicesConfig {
     #[serde(default)]

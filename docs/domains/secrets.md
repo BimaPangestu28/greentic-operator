@@ -28,3 +28,7 @@ Secrets flows receive the common payload:
 Secrets provider packs should surface failures through the runner `RunResult`. For
 additional validation, the operator runs `greentic-pack doctor` with local validators
 when available.
+
+## Artifacts
+
+Secrets setups also emit `run.json`/`summary.txt` under `state/runs/secrets/<pack>/<flow>/<timestamp>/`, making it easy to correlate doctor checks against what the pack reported.

@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use serde_cbor::Value as CborValue;
 use zip::result::ZipError;
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, PartialOrd, Ord)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, PartialOrd, Ord, Hash)]
 pub enum Domain {
     Messaging,
     Events,

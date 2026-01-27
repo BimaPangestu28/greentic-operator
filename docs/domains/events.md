@@ -31,3 +31,7 @@ does not have a public base URL.
 
 Events flows should report success/failure through the runner `RunResult` so the
 operator can surface diagnostics in `state/runs/`.
+
+## Artifacts
+
+Run summaries are stored under `state/runs/events/<pack>/<flow>/<timestamp>/` with the same `run.json`/`summary.txt`/`artifacts_dir` trio so operators can correlate webhook diagnostics with the recorded metadata.

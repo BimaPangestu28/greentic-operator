@@ -53,3 +53,15 @@ state/runs/<domain>/<pack>/<flow>/<timestamp>/
 
 Provider packs should ensure flow outcomes can be reflected in the runner `RunResult`
 and that failures are surfaced via non-success status.
+
+## Secrets helpers
+
+Operator workflows delegate secret orchestration to `greentic-secrets`. Run:
+
+```
+greentic-operator dev secrets init --tenant <TENANT> --team <TEAM> --pack <PATH_TO_PROVIDER_PACK>
+```
+
+and the CLI will forward the command to `greentic-secrets` with the current `--env`/`--tenant`/`--team`, streaming stdout/stderr to the terminal and to `state/logs/secrets/init-<timestamp>.log`. `dev secrets set/get/list/delete` behave the same and support `--secrets-bin` overrides or binary mappings from `greentic.yaml`.
+
+`greentic-operator dev setup messaging` (and `demo setup`/`demo build`) calls secrets init for every provider pack before running requirements, so missing secrets surface early along with instructions to run `greentic-operator dev secrets set <NAME>`. The logs in `state/logs/secrets/` capture the full greentic-secrets transcript for troubleshooting.

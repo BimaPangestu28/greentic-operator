@@ -32,3 +32,7 @@ does not have a public base URL.
 
 Messaging flows should report success/failure through the runner `RunResult` so the
 operator can surface diagnostics in `state/runs/`.
+
+## Artifacts
+
+Every demo run writes `run.json`, `summary.txt`, and the `artifacts_dir` link under `state/runs/messaging/<pack>/<flow>/<timestamp>/` so the operator UI or human reader can inspect how the pack executed.

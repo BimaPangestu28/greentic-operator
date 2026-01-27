@@ -11,8 +11,9 @@
   - **Key dependencies / integration points:** `clap` for argument parsing.
 - **Path:** `src/cli.rs`
   - **Role:** CLI definitions and command routing.
-  - **Key functionality:** Implements `dev init/scan/sync`, `dev setup/diagnostics/verify/doctor`, `dev secrets`, `dev on/off/status/map/detect`, `dev up/down/svc-status/logs`, `demo build/up/down/status/logs/doctor`, and gmap `allow/forbid` with hybrid dev-mode binary resolution.
+  - **Key functionality:** Implements the dev tree (`dev init/scan/sync`, `dev setup/diagnostics/verify/doctor`, `dev secrets`, `dev on/off/status/map/detect`, `dev up/down/svc-status/logs`) plus the demo tree (`demo new/build/start/stop/setup/send/receive/down/status/logs/doctor`, `allow/forbid`). Demo start/stop is canonical and accepts a `--domains` selection that auto-detects messaging/events providers, while `demo receive` lets you spy on a domain-specific ingress subject; `demo up/down` warn on use and the top-level `dev` command is hidden from `--help`.
   - **Key dependencies / integration points:** Calls into `project`, `gmap`, `domains`, `doctor`, `bin_resolver`, and secrets tooling.
+  - **Recent updates:** Adds doctor gating for `demo build`, a `dev secrets` passthrough that logs to `state/logs/secrets/`, and hides `dev up/down/embedded/svc-status/logs` from the default help while warning they are legacy GSM paths when invoked.
 - **Path:** `src/cli/dev_secrets.rs`
   - **Role:** Secrets passthrough CLI.
   - **Key functionality:** Provides `dev secrets init/set/get/list/delete` with tenant/team/env context and exit code passthrough.
@@ -181,6 +182,7 @@
 - **Path:** `README.md`
   - **Role:** User-facing overview and quickstart.
   - **Key functionality:** Documents intended usage, dev/demo path dependency policy, and global dev-mode binary resolution.
+  - **Recent updates:** Highlights the canonical `demo start/stop` quickstart, covers the new `dev secrets` passthrough plus doctor/secrets gating, and lists the hidden GSM commands that warn before running.
   - **Key dependencies / integration points:** N/A.
 - **Path:** `.codex/PR.md`
   - **Role:** Product/PR specification.
@@ -191,6 +193,9 @@
 - **Location:** `.codex/PR.md`
   - **Status:** TODO
   - **Short description:** Remaining optional items beyond OP-PR-07 and OP-PR-05 (if any) are not yet implemented.
+- **Location:** PR-12 (doc cleanups)
+  - **Status:** Pending
+  - **Short description:** Remove GSM binary/config references from the demo bundle expectations so bundles no longer rely on `gsm-*` executables.
 
 ## 4. Broken, Failing, or Conflicting Areas
 - **Location:** Repo-wide
@@ -198,4 +203,5 @@
   - **Likely cause / nature of issue:** N/A.
 
 ## 5. Notes for Future Work
+- Bundle scaffolding now creates `providers/messaging`, `providers/events`, `packs`, and tenant/team gmaps, so `demo doctor` can succeed without manual layout tweaks (PR-06).
 - Integrate supervisor runtime state with actual demo service startup (OP-PR-11B/11C/11D/11E).

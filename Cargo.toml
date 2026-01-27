@@ -23,14 +23,22 @@ chrono = "0.4"
 sysinfo = "0.38"
 directories-next = "2"
 greentic-runner-desktop = { version = "0.4" }
-tokio = { version = "1", features = ["rt-multi-thread", "sync", "signal"] }
+tokio = { version = "1", features = ["rt-multi-thread", "sync", "signal", "net"] }
+hyper = { version = "0.14", features = ["full"] }
 gsm-gateway = { version = "0.4" }
 gsm-egress = { version = "0.4" }
 gsm-subscriptions-teams = { version = "0.4" }
 gsm-core = { version = "0.4" }
+messaging-cardkit = { path = "crates/messaging-cardkit" }
 rpassword = "7"
 greentic-secrets-lib = "0.4.14"
 
 [dev-dependencies]
 tempfile = "3.10"
 async-trait = "0.1"
+
+[workspace]
+members = ["crates/messaging-cardkit"]
+
+[patch.crates-io]
+gsm-core = { path = "../greentic-messaging/libs/core" }

@@ -1,25 +1,20 @@
-use std::env;
 use std::path::{Path, PathBuf};
 
 use std::collections::{BTreeMap, BTreeSet};
 
 use anyhow::Context;
 
-use crate::cloudflared::{self, CloudflaredConfig};
-use crate::config::DemoConfig;
-use crate::dev_mode::DevSettingsResolved;
 use crate::operator_log;
 use crate::runtime_state::{
-    RuntimePaths, ServiceEntry, ServiceManifest, persist_service_manifest, read_service_manifest,
-    remove_service_manifest, write_json,
+    RuntimePaths, persist_service_manifest, read_service_manifest, remove_service_manifest,
+    write_json,
 };
 use crate::services;
 use crate::supervisor;
 
-struct ServiceTracker<'a> {
-    paths: &'a RuntimePaths,
-    manifest: ServiceManifest,
-}
+use crate::cloudflared::{self, CloudflaredConfig};
+use crate::config::DemoConfig;
+use crate::dev_mode::DevSettingsResolved;
 
 struct ServiceSummary {
     id: String,
@@ -65,10 +60,16 @@ impl ServiceSummary {
         }
     }
 }
+
+struct ServiceTracker<'a> {
+    paths: &'a RuntimePaths,
+    manifest: crate::runtime_state::ServiceManifest,
+}
+
 impl<'a> ServiceTracker<'a> {
     fn new(paths: &'a RuntimePaths, log_dir: Option<&Path>) -> anyhow::Result<Self> {
         remove_service_manifest(paths)?;
-        let mut manifest = ServiceManifest::default();
+        let mut manifest = crate::runtime_state::ServiceManifest::default();
         if let Some(dir) = log_dir {
             manifest.log_dir = Some(dir.display().to_string());
         }
@@ -76,7 +77,7 @@ impl<'a> ServiceTracker<'a> {
         Ok(Self { paths, manifest })
     }
 
-    fn record(&mut self, entry: ServiceEntry) -> anyhow::Result<()> {
+    fn record(&mut self, entry: crate::runtime_state::ServiceEntry) -> anyhow::Result<()> {
         self.manifest.services.push(entry);
         persist_service_manifest(self.paths, &self.manifest)
     }
@@ -87,7 +88,7 @@ impl<'a> ServiceTracker<'a> {
         kind: impl Into<String>,
         log_path: Option<&Path>,
     ) -> anyhow::Result<()> {
-        let entry = ServiceEntry::new(id, kind, log_path);
+        let entry = crate::runtime_state::ServiceEntry::new(id, kind, log_path);
         self.record(entry)
     }
 }
@@ -146,7 +147,7 @@ fn spawn_embedded_messaging(
     restart: &BTreeSet<String>,
     tracker: &mut ServiceTracker,
 ) -> anyhow::Result<ServiceSummary> {
-    let exe = env::current_exe()?;
+    let exe = std::env::current_exe()?;
     let mut args = vec![
         "dev".to_string(),
         "embedded".to_string(),
@@ -181,13 +182,72 @@ fn spawn_embedded_messaging(
     Ok(summary)
 }
 
+fn spawn_if_needed(
+    paths: &RuntimePaths,
+    spec: &supervisor::ServiceSpec,
+    restart: &BTreeSet<String>,
+    log_path_override: Option<PathBuf>,
+) -> anyhow::Result<Option<supervisor::ServiceHandle>> {
+    if should_restart(restart, spec.id.as_str()) {
+        let _ = supervisor::stop_service(paths, &spec.id, 2_000);
+    }
+
+    let pid_path = paths.pid_path(spec.id.as_str());
+    if let Some(pid) = read_pid(&pid_path)?
+        && supervisor::is_running(pid)
+    {
+        println!("{}: already running (pid={pid})", spec.id.as_str());
+        return Ok(None);
+    }
+    let handle = supervisor::spawn_service(paths, spec.clone(), log_path_override.clone())?;
+    println!("{}: started (pid={})", spec.id.as_str(), handle.pid);
+    if spec.id.as_str() == "nats" {
+        operator_log::info(
+            module_path!(),
+            format!(
+                "spawned nats pid={} log={}",
+                handle.pid,
+                handle.log_path.display()
+            ),
+        );
+    }
+    Ok(Some(handle))
+}
+
+fn read_pid(path: &Path) -> anyhow::Result<Option<u32>> {
+    if !path.exists() {
+        return Ok(None);
+    }
+    let contents = std::fs::read_to_string(path)?;
+    let trimmed = contents.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(trimmed.parse()?))
+}
+
+fn looks_like_path(value: &str) -> bool {
+    value.contains('/') || value.contains('\\') || Path::new(value).is_absolute()
+}
+
+fn should_restart(restart: &BTreeSet<String>, service: &str) -> bool {
+    restart.contains("all") || restart.contains(service)
+}
+
 #[allow(clippy::too_many_arguments)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NatsMode {
+    Off,
+    On,
+    External,
+}
+
 pub fn demo_up(
     bundle_root: &Path,
     tenant: &str,
     team: Option<&str>,
     nats_url: Option<&str>,
-    no_nats: bool,
+    nats_mode: NatsMode,
     messaging_enabled: bool,
     cloudflared: Option<CloudflaredConfig>,
     events_components: Vec<crate::services::ComponentSpec>,
@@ -237,7 +297,7 @@ pub fn demo_up(
     }
 
     let mut resolved_nats_url = nats_url.map(|value| value.to_string());
-    if !no_nats && resolved_nats_url.is_none() {
+    if matches!(nats_mode, NatsMode::On) && resolved_nats_url.is_none() {
         match operator_log::reserve_service_log(log_dir, "nats") {
             Ok(nats_log) => {
                 operator_log::info(
@@ -278,7 +338,8 @@ pub fn demo_up(
         }
     }
 
-    if messaging_enabled {
+    let run_gsm_services = matches!(nats_mode, NatsMode::On);
+    if messaging_enabled && run_gsm_services {
         let env_map = build_env(
             tenant,
             team_id,
@@ -297,7 +358,7 @@ pub fn demo_up(
         messaging_summary.add_detail("embedded messaging stack".to_string());
         service_summaries.push(messaging_summary);
     } else {
-        println!("messaging: skipped (disabled or no providers)");
+        println!("messaging: running embedded runner (no gsm gateway/egress)");
     }
 
     if !events_components.is_empty() && resolved_nats_url.is_some() {
@@ -319,6 +380,13 @@ pub fn demo_up(
         println!("events: skipped (disabled or no providers)");
     }
     print_service_summary(&service_summaries);
+
+    if !run_gsm_services {
+        operator_log::info(
+            module_path!(),
+            "demo running in embedded runner mode; gateway/egress disabled",
+        );
+    }
 
     Ok(())
 }
@@ -815,58 +883,6 @@ fn build_service_spec(
         cwd: None,
         env: env.clone(),
     })
-}
-
-fn spawn_if_needed(
-    paths: &RuntimePaths,
-    spec: &supervisor::ServiceSpec,
-    restart: &BTreeSet<String>,
-    log_path_override: Option<PathBuf>,
-) -> anyhow::Result<Option<supervisor::ServiceHandle>> {
-    if should_restart(restart, spec.id.as_str()) {
-        let _ = supervisor::stop_service(paths, &spec.id, 2_000);
-    }
-
-    let pid_path = paths.pid_path(spec.id.as_str());
-    if let Some(pid) = read_pid(&pid_path)?
-        && supervisor::is_running(pid)
-    {
-        println!("{}: already running (pid={pid})", spec.id.as_str());
-        return Ok(None);
-    }
-    let handle = supervisor::spawn_service(paths, spec.clone(), log_path_override.clone())?;
-    println!("{}: started (pid={})", spec.id.as_str(), handle.pid);
-    if spec.id.as_str() == "nats" {
-        operator_log::info(
-            module_path!(),
-            format!(
-                "spawned nats pid={} log={}",
-                handle.pid,
-                handle.log_path.display()
-            ),
-        );
-    }
-    Ok(Some(handle))
-}
-
-fn read_pid(path: &Path) -> anyhow::Result<Option<u32>> {
-    if !path.exists() {
-        return Ok(None);
-    }
-    let contents = std::fs::read_to_string(path)?;
-    let trimmed = contents.trim();
-    if trimmed.is_empty() {
-        return Ok(None);
-    }
-    Ok(Some(trimmed.parse()?))
-}
-
-fn looks_like_path(value: &str) -> bool {
-    value.contains('/') || value.contains('\\') || Path::new(value).is_absolute()
-}
-
-fn should_restart(restart: &BTreeSet<String>, service: &str) -> bool {
-    restart.contains("all") || restart.contains(service)
 }
 
 #[derive(serde::Serialize)]
