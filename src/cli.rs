@@ -41,6 +41,7 @@ use crate::runner_exec;
 use crate::runner_integration;
 use crate::runtime_state::RuntimePaths;
 use crate::secrets_gate::{self, DynSecretsManager};
+use crate::secrets_manager;
 use crate::settings;
 use crate::setup_input::{SetupInputAnswers, collect_setup_answers, load_setup_input};
 use crate::state_layout;
@@ -875,7 +876,7 @@ struct DemoDoctorArgs {
 #[command(
     about = "Send a demo message via a provider pack.",
     long_about = "Runs provider requirements or sends a generic message payload.",
-    after_help = "Main options:\n  --bundle <DIR>\n  --provider <PROVIDER>\n\nOptional options:\n  --text <TEXT>\n  --arg <k=v>...\n  --args-json <JSON>\n  --tenant <TENANT> (default: demo)\n  --team <TEAM> (default: default)\n  --print-required-args"
+    after_help = "Main options:\n  --bundle <DIR>\n  --provider <PROVIDER>\n\nOptional options:\n  --text <TEXT>\n  --arg <k=v>...\n  --args-json <JSON>\n  --env <ENV> (default: demo)\n  --tenant <TENANT> (default: demo)\n  --team <TEAM> (default: default)\n  --print-required-args"
 )]
 struct DemoSendArgs {
     #[arg(long)]
@@ -896,6 +897,8 @@ struct DemoSendArgs {
     print_required_args: bool,
     #[arg(long)]
     runner_binary: Option<PathBuf>,
+    #[arg(long, default_value = "demo")]
+    env: String,
 }
 
 #[derive(Parser)]
@@ -1080,11 +1083,13 @@ impl DemoSubscriptionsEnsureArgs {
         let provider_map = discovery_map(&discovery.providers);
         let provider_id = provider_id_for_pack(&pack.path, &pack.pack_id, Some(&provider_map));
 
+        let secrets_handle =
+            secrets_gate::resolve_secrets_manager(&bundle, &tenant, team_override.as_deref())?;
         let runner_host = DemoRunnerHost::new(
             bundle.clone(),
             &discovery,
             None,
-            secrets_gate::default_manager(),
+            secrets_handle.manager(),
             false,
         )?;
         let context = OperatorContext {
@@ -2089,7 +2094,12 @@ impl DemoUpArgs {
             }
 
             if let Some(setup_input) = self.setup_input.as_ref() {
-                let secrets_manager = secrets_gate::default_manager();
+                let tenant_ref = self.tenant.as_deref().unwrap_or(DEMO_DEFAULT_TENANT);
+                let secrets_handle = secrets_gate::resolve_secrets_manager(
+                    &bundle,
+                    tenant_ref,
+                    self.team.as_deref(),
+                )?;
                 run_demo_up_setup(
                     &bundle,
                     &domains_to_setup,
@@ -2099,7 +2109,7 @@ impl DemoUpArgs {
                     &self.env,
                     self.runner_binary.clone(),
                     public_base_url.clone(),
-                    Some(secrets_manager),
+                    Some(secrets_handle.manager()),
                 )?;
             }
 
@@ -2522,13 +2532,16 @@ impl DemoSendArgs {
         let provider_map = discovery_map(&discovery.providers);
         let provider_id = provider_id_for_pack(&pack.path, &pack.pack_id, Some(&provider_map));
 
+        let secrets_handle =
+            secrets_gate::resolve_secrets_manager(&self.bundle, &self.tenant, team)?;
         let runner_host = DemoRunnerHost::new(
             self.bundle.clone(),
             &discovery,
             self.runner_binary.clone(),
-            secrets_gate::default_manager(),
+            secrets_handle.manager(),
             false,
         )?;
+        let env = self.env.clone();
         let context = OperatorContext {
             tenant: self.tenant.clone(),
             team: team.map(|value| value.to_string()),
@@ -2540,7 +2553,6 @@ impl DemoSendArgs {
                 eprintln!("{message}");
                 std::process::exit(2);
             }
-            let env = crate::tools::secrets::resolve_env();
             let input = build_input_payload(
                 &self.bundle,
                 Domain::Messaging,
@@ -2658,7 +2670,33 @@ impl DemoSendArgs {
         .context("send_payload failed")?;
         println!("ok");
         if let Some(value) = send_outcome.output {
-            let json = serde_json::to_string_pretty(&value)?;
+            let missing_keys = if payload_contains_secret_error(&value) {
+                gather_missing_secret_keys(
+                    &secrets_handle.manager(),
+                    &env,
+                    &self.tenant,
+                    team,
+                    &pack.path,
+                    &provider_id,
+                    secrets_handle.dev_store_path.as_deref(),
+                    secrets_handle.using_env_fallback,
+                    Some(provider_type.as_str()),
+                )
+            } else {
+                Vec::new()
+            };
+            let enriched = enrich_secret_error_payload(
+                value,
+                &context,
+                &env,
+                &provider_type,
+                &pack.pack_id,
+                &pack.path,
+                &missing_keys,
+                &secrets_handle.selection,
+                secrets_handle.dev_store_path.as_deref(),
+            );
+            let json = serde_json::to_string_pretty(&enriched)?;
             println!("{json}");
         } else if let Some(raw) = send_outcome.raw {
             println!("{raw}");
@@ -2698,6 +2736,121 @@ fn run_provider_component_op_json(
 ) -> anyhow::Result<serde_json::Value> {
     let outcome = run_provider_component_op(runner_host, pack, provider_id, ctx, op, payload)?;
     Ok(outcome.output.unwrap_or_else(|| json!({})))
+}
+
+fn enrich_secret_error_payload(
+    mut payload: serde_json::Value,
+    ctx: &OperatorContext,
+    env: &str,
+    provider_type: &str,
+    pack_id: &str,
+    pack_path: &Path,
+    missing_keys: &[String],
+    selection: &secrets_manager::SecretsManagerSelection,
+    dev_store_path: Option<&Path>,
+) -> serde_json::Value {
+    let team = secrets_manager::canonical_team(ctx.team.as_deref()).to_string();
+    let selection_desc = selection.description();
+    let dev_store_desc = dev_store_path
+        .map(|path| path.display().to_string())
+        .unwrap_or_else(|| "<default>".to_string());
+    let context_suffix = format!(
+        "env={} tenant={} team={} provider={} pack_id={} pack_path={} secrets_manager={} dev_store={}",
+        env,
+        ctx.tenant,
+        team,
+        provider_type,
+        pack_id,
+        pack_path.display(),
+        selection_desc,
+        dev_store_desc
+    );
+    if let serde_json::Value::Object(map) = &mut payload {
+        for key in ["message", "error"] {
+            if let Some(entry) = map.get_mut(key) {
+                if let Some(text) = entry.as_str() {
+                    if text_contains_secret_error(text) {
+                        let suffix = secret_error_suffix(&context_suffix, missing_keys);
+                        let enriched = format!("{text} ({suffix})");
+                        *entry = serde_json::Value::String(enriched);
+                    }
+                }
+            }
+        }
+    }
+    payload
+}
+
+fn payload_contains_secret_error(value: &JsonValue) -> bool {
+    for key in ["message", "error"] {
+        if let Some(text) = value.get(key).and_then(JsonValue::as_str) {
+            if text_contains_secret_error(text) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+fn text_contains_secret_error(text: &str) -> bool {
+    let lower = text.to_lowercase();
+    lower.contains("secret store error") || text.contains("SecretsError")
+}
+
+fn secret_error_suffix(context_suffix: &str, missing_keys: &[String]) -> String {
+    if missing_keys.is_empty() {
+        context_suffix.to_string()
+    } else {
+        let missing = missing_keys.join(", ");
+        format!("{context_suffix}; missing secrets: {missing}")
+    }
+}
+
+fn gather_missing_secret_keys(
+    manager: &DynSecretsManager,
+    env: &str,
+    tenant: &str,
+    team: Option<&str>,
+    pack_path: &Path,
+    provider_id: &str,
+    store_path: Option<&Path>,
+    using_env_fallback: bool,
+    provider_type: Option<&str>,
+) -> Vec<String> {
+    match secrets_gate::check_provider_secrets(
+        manager,
+        env,
+        tenant,
+        team,
+        pack_path,
+        provider_id,
+        provider_type,
+        store_path,
+        using_env_fallback,
+    ) {
+        Ok(Some(missing)) => missing
+            .into_iter()
+            .map(extract_secret_key_from_uri)
+            .collect(),
+        Ok(None) => Vec::new(),
+        Err(err) => {
+            operator_log::warn(
+                module_path!(),
+                format!(
+                    "failed to check missing secrets for provider {}: {}",
+                    provider_id, err
+                ),
+            );
+            Vec::new()
+        }
+    }
+}
+
+fn extract_secret_key_from_uri(uri: String) -> String {
+    uri.rsplit('/')
+        .next()
+        .map(|segment| segment.to_string())
+        .unwrap_or(uri)
 }
 
 fn parse_provider_payload(mut value: JsonValue) -> anyhow::Result<ProviderPayloadV1> {
@@ -2772,11 +2925,16 @@ impl DemoReceiveArgs {
             .append(true)
             .open(&log_path)?;
         let log_writer = Arc::new(Mutex::new(std::io::BufWriter::new(log_file)));
+        let secrets_handle = secrets_gate::resolve_secrets_manager(
+            &self.bundle,
+            &self.tenant,
+            team_context.as_deref(),
+        )?;
         let runner_host = Arc::new(DemoRunnerHost::new(
             self.bundle.clone(),
             &discovery,
             self.runner_binary.clone(),
-            secrets_gate::default_manager(),
+            secrets_handle.manager(),
             false,
         )?);
         let context = OperatorContext {
@@ -4302,6 +4460,9 @@ fn run_plan_item(
             team,
             &item.pack.path,
             &provider_id,
+            None,
+            None,
+            false,
         ) {
             Ok(Some(missing)) => {
                 let formatted = missing

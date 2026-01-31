@@ -39,13 +39,17 @@ greentic-secrets-lib = "0.4.14"
 greentic-types = { version = "0.4", features = ["serde"] }
 uuid = { version = "1", features = ["v4"] }
 rand = "0.9"
+async-trait = "0.1"
+secret_name = { path = "secret_name" }
 
 [dev-dependencies]
 tempfile = "3.10"
-async-trait = "0.1"
 
 [workspace]
-members = ["crates/messaging-cardkit"]
+members = [
+    "crates/messaging-cardkit",
+    "secret_name",
+]
 
 [patch.crates-io]
 gsm-core = { path = "../greentic-messaging/libs/core" }

@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::env;
 use std::fs;
 use std::io::Read;
 #[cfg(unix)]
@@ -17,7 +18,6 @@ use greentic_runner_host::{
         WebhookPolicy,
     },
     pack::{ComponentResolution, PackRuntime},
-    secrets::default_manager,
     storage::{DynSessionStore, new_state_store},
     trace::TraceConfig,
     validate::ValidationConfig,
@@ -37,7 +37,8 @@ use crate::cards::CardRenderer;
 use crate::discovery;
 use crate::domains::{self, Domain, ProviderPack};
 use crate::operator_log;
-use crate::secrets_gate::DynSecretsManager;
+use crate::secrets_gate::{self, DynSecretsManager};
+use crate::secrets_manager;
 use crate::state_layout;
 use messaging_cardkit::Tier;
 
@@ -353,13 +354,17 @@ impl DemoRunnerHost {
         &self,
         _domain: Domain,
         pack: &ProviderPack,
-        _provider_id: &str,
+        provider_id: &str,
         op_id: &str,
         payload_bytes: &[u8],
         ctx: &OperatorContext,
     ) -> anyhow::Result<FlowOutcome> {
-        let secrets_manager = default_manager()
-            .context("failed to create secrets manager for provider invocation")?;
+        let secrets_handle = secrets_gate::resolve_secrets_manager(
+            &self.bundle_root,
+            &ctx.tenant,
+            ctx.team.as_deref(),
+        )
+        .context("failed to create secrets manager for provider invocation")?;
         let runtime = TokioRuntime::new()
             .context("failed to create tokio runtime for provider invocation")?;
         let payload = payload_bytes.to_vec();
@@ -373,7 +378,7 @@ impl DemoRunnerHost {
                 None::<DynSessionStore>,
                 Some(new_state_store()),
                 Arc::new(RunnerWasiPolicy::default()),
-                secrets_manager.clone(),
+                secrets_handle.manager(),
                 None,
                 false,
                 ComponentResolution::default(),
@@ -409,13 +414,27 @@ impl DemoRunnerHost {
                 error: None,
                 mode: RunnerExecutionMode::Exec,
             }),
-            Err(err) => Ok(FlowOutcome {
-                success: false,
-                output: None,
-                raw: None,
-                error: Some(err.to_string()),
-                mode: RunnerExecutionMode::Exec,
-            }),
+            Err(err) => {
+                let err_message = err.to_string();
+                let needs_context = needs_secret_context(&err_message);
+                let enriched_err = if needs_context {
+                    err.context(secret_error_context(ctx, provider_id, op_id, pack))
+                } else {
+                    err
+                };
+                let error_text = if needs_context {
+                    enriched_err.to_string()
+                } else {
+                    err_message
+                };
+                Ok(FlowOutcome {
+                    success: false,
+                    output: None,
+                    raw: None,
+                    error: Some(error_text),
+                    mode: RunnerExecutionMode::Exec,
+                })
+            }
         }
     }
 }
@@ -446,6 +465,31 @@ pub fn primary_provider_type(pack_path: &Path) -> anyhow::Result<String> {
         )
     })?;
     Ok(provider.provider_type.clone())
+}
+
+fn needs_secret_context(message: &str) -> bool {
+    let lower = message.to_lowercase();
+    lower.contains("secret store error") || message.contains("SecretsError")
+}
+
+fn secret_error_context(
+    ctx: &OperatorContext,
+    provider_id: &str,
+    op_id: &str,
+    pack: &ProviderPack,
+) -> String {
+    let env = env::var("GREENTIC_ENV").unwrap_or_else(|_| "local".to_string());
+    let team = secrets_manager::canonical_team(ctx.team.as_deref()).into_owned();
+    format!(
+        "secret lookup context env={} tenant={} team={} provider={} flow={} pack_id={} pack_path={}",
+        env,
+        ctx.tenant,
+        team,
+        provider_id,
+        op_id,
+        pack.pack_id,
+        pack.path.display()
+    )
 }
 
 fn read_transcript_outputs(run_dir: &Path) -> anyhow::Result<Option<JsonValue>> {

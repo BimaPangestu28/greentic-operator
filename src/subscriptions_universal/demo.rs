@@ -8,6 +8,7 @@ use crate::config::DemoDesiredSubscription;
 use crate::demo::runner_host::{DemoRunnerHost, OperatorContext};
 use crate::discovery;
 use crate::domains::Domain;
+use crate::secrets_gate;
 use crate::subscriptions_universal::scheduler::Scheduler;
 use crate::subscriptions_universal::{AuthUserRefV1, SubscriptionEnsureRequest};
 
@@ -22,11 +23,12 @@ pub fn build_runner(
 ) -> Result<(DemoRunnerHost, OperatorContext)> {
     let discovery =
         discovery::discover_with_options(bundle, discovery::DiscoveryOptions { cbor_only: true })?;
+    let secrets_handle = secrets_gate::resolve_secrets_manager(bundle, tenant, team.as_deref())?;
     let runner_host = DemoRunnerHost::new(
         bundle.to_path_buf(),
         &discovery,
         None,
-        crate::secrets_gate::default_manager(),
+        secrets_handle.manager(),
         false,
     )?;
     let context = OperatorContext {
