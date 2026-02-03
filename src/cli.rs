@@ -21,16 +21,19 @@ use tokio::sync::Mutex;
 use crate::bin_resolver::{self, ResolveCtx};
 use crate::config;
 use crate::config_gate::{self, ConfigGateItem, ConfigValueSource};
-use crate::demo::http_ingress::{HttpIngressConfig, HttpIngressServer};
-use crate::demo::runner_host::{
-    DemoRunnerHost, FlowOutcome, OperatorContext, primary_provider_type,
+use crate::demo::{
+    self, BuildOptions,
+    card::{detect_adaptive_card_view, print_card_summary},
+    http_ingress::{HttpIngressConfig, HttpIngressServer},
+    input as demo_input, pack_resolve,
+    runner_host::{DemoRunnerHost, FlowOutcome, OperatorContext, primary_provider_type},
+    setup::{ProvidersInput, discover_tenants},
 };
-use crate::demo::setup::{ProvidersInput, discover_tenants};
-use crate::demo::{self, BuildOptions};
 use crate::dev_mode::{
     DevCliOverrides, DevMode, DevProfile, DevSettingsResolved, effective_dev_settings,
     merge_settings,
 };
+use crate::dev_store_path;
 use crate::discovery;
 use crate::domains::{self, Domain, DomainAction};
 use crate::gmap::{self, Policy};
@@ -45,6 +48,7 @@ use crate::runner_integration;
 use crate::runtime_state::RuntimePaths;
 use crate::secrets_gate::{self, DynSecretsManager, SecretsManagerHandle};
 use crate::secrets_manager;
+use crate::secrets_setup::resolve_env;
 use crate::settings;
 use crate::setup_input::{SetupInputAnswers, collect_setup_answers, load_setup_input};
 use crate::state_layout;
@@ -60,12 +64,10 @@ use std::time::Duration;
 use uuid::Uuid;
 
 mod dev_mode_cmd;
-mod dev_secrets;
 
 use dev_mode_cmd::{
     DevModeDetectArgs, DevModeMapCommand, DevModeOffArgs, DevModeOnArgs, DevModeStatusArgs,
 };
-use dev_secrets::DevSecretsCommand;
 #[derive(Parser)]
 #[command(name = "greentic-operator")]
 #[command(about = "Greentic operator tooling", version)]
@@ -121,7 +123,6 @@ enum DevSubcommand {
     Diagnostics(DomainDiagnosticsArgs),
     Verify(DomainVerifyArgs),
     Doctor(DevDoctorArgs),
-    Secrets(DevSecretsCommand),
 }
 
 #[derive(Subcommand)]
@@ -145,8 +146,12 @@ enum DemoSubcommand {
     Forbid(DemoPolicyArgs),
     #[command(about = "Manage demo subscriptions via provider components")]
     Subscriptions(DemoSubscriptionsCommand),
-    #[command(about = "Forward secrets commands to greentic-secrets with demo defaults")]
-    Secrets(DevSecretsCommand),
+    #[command(about = "Run a pack/flow with inline input")]
+    Run(DemoRunArgs),
+    #[command(about = "List resolved packs from a bundle")]
+    ListPacks(DemoListPacksArgs),
+    #[command(about = "List flows declared by a pack")]
+    ListFlows(DemoListFlowsArgs),
 }
 
 #[derive(Parser)]
@@ -375,7 +380,7 @@ struct DevLogsArgs {
 #[command(
     about = "Run provider setup flows for a domain.",
     long_about = "Executes setup_default across providers and can auto-run secrets init for messaging.",
-    after_help = "Main options:\n  <DOMAIN>\n  --tenant <TENANT>\n\nOptional options:\n  --team <TEAM>\n  --provider <FILTER>\n  --dry-run\n  --format <text|json|yaml> (default: text)\n  --parallel <N> (default: 1)\n  --allow-missing-setup\n  --online\n  --secrets-env <ENV>\n  --secrets-bin <PATH>\n  --project-root <PATH> (default: current directory)"
+    after_help = "Main options:\n  <DOMAIN>\n  --tenant <TENANT>\n\nOptional options:\n  --team <TEAM>\n  --provider <FILTER>\n  --dry-run\n  --format <text|json|yaml> (default: text)\n  --parallel <N> (default: 1)\n  --allow-missing-setup\n  --online\n  --secrets-env <ENV>\n  --project-root <PATH> (default: current directory)"
 )]
 struct DomainSetupArgs {
     domain: DomainArg,
@@ -397,8 +402,6 @@ struct DomainSetupArgs {
     online: bool,
     #[arg(long)]
     secrets_env: Option<String>,
-    #[arg(long)]
-    secrets_bin: Option<PathBuf>,
     #[arg(long)]
     project_root: Option<PathBuf>,
 }
@@ -762,7 +765,7 @@ impl From<NatsModeArg> for demo::NatsMode {
 #[command(
     about = "Run provider setup flows against a demo bundle.",
     long_about = "Executes setup flows for provider packs included in the bundle.",
-    after_help = "Main options:\n  --bundle <DIR>\n  --tenant <TENANT>\n\nOptional options:\n  --team <TEAM>\n  --domain <messaging|events|secrets|all> (default: all)\n  --provider <FILTER>\n  --dry-run\n  --format <text|json|yaml> (default: text)\n  --parallel <N> (default: 1)\n  --allow-missing-setup\n  --online\n  --secrets-env <ENV>\n  --secrets-bin <PATH>\n  --skip-secrets-init\n  --setup-input <PATH>\n  --runner-binary <PATH>\n  --best-effort"
+    after_help = "Main options:\n  --bundle <DIR>\n  --tenant <TENANT>\n\nOptional options:\n  --team <TEAM>\n  --domain <messaging|events|secrets|all> (default: all)\n  --provider <FILTER>\n  --dry-run\n  --format <text|json|yaml> (default: text)\n  --parallel <N> (default: 1)\n  --allow-missing-setup\n  --online\n  --secrets-env <ENV>\n  --skip-secrets-init\n  --setup-input <PATH>\n  --runner-binary <PATH>\n  --best-effort"
 )]
 struct DemoSetupArgs {
     #[arg(long)]
@@ -787,8 +790,6 @@ struct DemoSetupArgs {
     online: bool,
     #[arg(long)]
     secrets_env: Option<String>,
-    #[arg(long)]
-    secrets_bin: Option<PathBuf>,
     #[arg(long)]
     skip_secrets_init: bool,
     #[arg(long)]
@@ -951,6 +952,52 @@ struct DemoSubscriptionsCommand {
     command: DemoSubscriptionsSubcommand,
 }
 
+#[derive(Parser)]
+#[command(
+    about = "Run a pack/flow with inline input.",
+    long_about = "Resolves the selected pack, picks the requested or default flow, parses any provided input, and prints a run summary."
+)]
+struct DemoRunArgs {
+    #[arg(long, default_value = "./packs")]
+    packs_dir: PathBuf,
+    #[arg(long)]
+    pack: String,
+    #[arg(long)]
+    tenant: String,
+    #[arg(long)]
+    team: Option<String>,
+    #[arg(long)]
+    flow: Option<String>,
+    #[arg(long)]
+    input: Option<String>,
+}
+
+#[derive(Parser)]
+#[command(
+    about = "List provider packs for a domain",
+    long_about = "Prints each pack_id and how many entry flows it declares for the selected domain."
+)]
+struct DemoListPacksArgs {
+    #[arg(long, default_value = ".")]
+    bundle: PathBuf,
+    #[arg(long, value_enum, default_value_t = DomainArg::Messaging)]
+    domain: DomainArg,
+}
+
+#[derive(Parser)]
+#[command(
+    about = "List flows exposed by a provider pack",
+    long_about = "Shows the entry flows declared by the matching pack so you can pass --flow to demo run."
+)]
+struct DemoListFlowsArgs {
+    #[arg(long, default_value = ".")]
+    bundle: PathBuf,
+    #[arg(long)]
+    pack: String,
+    #[arg(long, value_enum, default_value_t = DomainArg::Messaging)]
+    domain: DomainArg,
+}
+
 #[derive(Subcommand)]
 enum DemoSubscriptionsSubcommand {
     Ensure(DemoSubscriptionsEnsureArgs),
@@ -1053,6 +1100,71 @@ impl DemoSubscriptionsCommand {
             DemoSubscriptionsSubcommand::Renew(args) => args.run(),
             DemoSubscriptionsSubcommand::Delete(args) => args.run(),
         }
+    }
+}
+
+impl DemoRunArgs {
+    fn run(self, _ctx: &AppCtx) -> anyhow::Result<()> {
+        let pack = pack_resolve::resolve_pack(&self.packs_dir, &self.pack)?;
+        let flow_id = pack.select_flow(self.flow.as_deref())?;
+        let parsed_input = match self.input {
+            Some(value) => Some(demo_input::parse_input(&value)?),
+            None => None,
+        };
+        let team_display = self.team.as_deref().unwrap_or("default");
+        let input_desc = match &parsed_input {
+            None => "none".to_string(),
+            Some(parsed) => match &parsed.source {
+                demo_input::InputSource::Inline(encoding) => {
+                    format!("inline ({})", encoding.label())
+                }
+                demo_input::InputSource::File { path, encoding } => {
+                    format!("file {} ({})", path.display(), encoding.label())
+                }
+            },
+        };
+        println!("Run summary:");
+        println!("  pack: {} ({})", pack.pack_id, pack.pack_path.display());
+        println!("  tenant: {} team: {}", self.tenant, team_display);
+        println!("  flow: {}", flow_id);
+        println!("  input: {}", input_desc);
+        Ok(())
+    }
+}
+
+impl DemoListPacksArgs {
+    fn run(self, _ctx: &AppCtx) -> anyhow::Result<()> {
+        let domain = Domain::from(self.domain);
+        let packs = demo_provider_packs(&self.bundle, domain)?;
+        if packs.is_empty() {
+            println!("no packs found for domain {:?}", domain);
+            return Ok(());
+        }
+        println!("packs for {}:", domains::domain_name(domain));
+        for pack in packs {
+            println!(
+                "  {} ({} entry flows) {}",
+                pack.pack_id,
+                pack.entry_flows.len(),
+                pack.file_name
+            );
+        }
+        Ok(())
+    }
+}
+
+impl DemoListFlowsArgs {
+    fn run(self, _ctx: &AppCtx) -> anyhow::Result<()> {
+        let domain = Domain::from(self.domain);
+        let pack = demo_provider_pack_by_filter(&self.bundle, domain, &self.pack)?;
+        println!(
+            "flows declared by pack {} ({}):",
+            pack.pack_id, pack.file_name
+        );
+        for flow_id in pack.entry_flows {
+            println!("  - {}", flow_id);
+        }
+        Ok(())
     }
 }
 
@@ -1422,7 +1534,6 @@ impl DevCommand {
             DevSubcommand::Diagnostics(args) => args.run(),
             DevSubcommand::Verify(args) => args.run(),
             DevSubcommand::Doctor(args) => args.run(ctx),
-            DevSubcommand::Secrets(args) => args.run(&ctx.settings),
         }
     }
 }
@@ -1452,10 +1563,12 @@ impl DemoCommand {
             DemoSubcommand::Status(args) => args.run(),
             DemoSubcommand::Logs(args) => args.run(),
             DemoSubcommand::Doctor(args) => args.run(ctx),
+            DemoSubcommand::ListPacks(args) => args.run(ctx),
+            DemoSubcommand::ListFlows(args) => args.run(ctx),
             DemoSubcommand::Allow(args) => args.run(Policy::Public),
             DemoSubcommand::Forbid(args) => args.run(Policy::Forbidden),
-            DemoSubcommand::Secrets(args) => args.run(&ctx.settings),
             DemoSubcommand::Subscriptions(args) => args.run(),
+            DemoSubcommand::Run(args) => args.run(ctx),
         }
     }
 }
@@ -1744,7 +1857,6 @@ impl DomainSetupArgs {
             allow_missing_setup: self.allow_missing_setup,
             online: self.online,
             secrets_env: self.secrets_env,
-            secrets_bin: self.secrets_bin,
             runner_binary: None,
             best_effort: false,
             setup_input: None,
@@ -1774,7 +1886,6 @@ impl DomainDiagnosticsArgs {
             allow_missing_setup: true,
             online: self.online,
             secrets_env: None,
-            secrets_bin: None,
             runner_binary: None,
             best_effort: false,
             setup_input: None,
@@ -1804,7 +1915,6 @@ impl DomainVerifyArgs {
             allow_missing_setup: true,
             online: self.online,
             secrets_env: None,
-            secrets_bin: None,
             runner_binary: None,
             best_effort: false,
             setup_input: None,
@@ -2453,11 +2563,6 @@ impl DemoSetupArgs {
                 } else {
                     self.secrets_env.clone()
                 },
-                secrets_bin: if self.skip_secrets_init {
-                    None
-                } else {
-                    self.secrets_bin.clone()
-                },
                 runner_binary: self.runner_binary.clone(),
                 best_effort: self.best_effort,
                 setup_input: self.setup_input.clone(),
@@ -2701,6 +2806,17 @@ impl DemoSendArgs {
         )
         .context("send_payload failed")?;
         println!("ok");
+        println!(
+            "Flow result: {}",
+            if send_outcome.success {
+                "success"
+            } else {
+                "failed"
+            }
+        );
+        if let Some(error) = &send_outcome.error {
+            println!("Flow error: {error}");
+        }
         if let Some(value) = send_outcome.output {
             if let Ok(parsed) = serde_json::from_value::<SendPayloadOutV1>(value.clone()) {
                 debug_print_send_payload_output(&parsed);
@@ -2720,7 +2836,6 @@ impl DemoSendArgs {
                     &self.tenant,
                     team,
                     &pack.path,
-                    &pack.pack_id,
                     &provider_id,
                     secrets_handle.dev_store_path.as_deref(),
                     secrets_handle.using_env_fallback,
@@ -2738,12 +2853,20 @@ impl DemoSendArgs {
                         .collect::<Vec<_>>()
                         .join("\n")
                 );
+                for uri in &missing_uris {
+                    print_secret_missing_details(
+                        uri,
+                        secrets_handle.dev_store_path.as_deref(),
+                        secrets_handle.using_env_fallback,
+                        &self.bundle,
+                    );
+                }
             }
             let enriched = enrich_secret_error_payload(
                 value,
                 &context,
                 &env,
-                &provider_type,
+                &provider_id,
                 &pack.pack_id,
                 &pack.path,
                 &missing_uris,
@@ -2777,6 +2900,11 @@ fn run_provider_component_op(
         ctx,
     )?;
     ensure_provider_op_success(provider_id, op, &outcome)?;
+    if let Some(value) = &outcome.output {
+        if let Some(card) = detect_adaptive_card_view(value) {
+            print_card_summary(&card);
+        }
+    }
     Ok(outcome)
 }
 
@@ -2797,7 +2925,7 @@ fn enrich_secret_error_payload(
     mut payload: serde_json::Value,
     ctx: &OperatorContext,
     env: &str,
-    provider_type: &str,
+    provider_id: &str,
     pack_id: &str,
     pack_path: &Path,
     missing_uris: &[String],
@@ -2814,7 +2942,7 @@ fn enrich_secret_error_payload(
         env,
         ctx.tenant,
         team,
-        provider_type,
+        provider_id,
         pack_id,
         pack_path.display(),
         selection_desc,
@@ -2833,6 +2961,30 @@ fn enrich_secret_error_payload(
         }
     }
     payload
+}
+
+fn print_secret_missing_details(
+    uri: &str,
+    store_path: Option<&Path>,
+    using_env_fallback: bool,
+    bundle_root: &Path,
+) {
+    let key = secrets_gate::canonical_secret_store_key(uri)
+        .unwrap_or_else(|| "<invalid secret uri>".to_string());
+    let default_store = dev_store_path::default_path(bundle_root);
+    let store_desc = match (store_path, using_env_fallback) {
+        (Some(path), _) => path.display().to_string(),
+        (None, true) => "<env secrets store>".to_string(),
+        (None, false) => default_store.display().to_string(),
+    };
+    println!("Secret not found:");
+    println!("  uri: {uri}");
+    println!("  key: {key}");
+    println!("  store: {store_desc}");
+    println!(
+        "hint: run `greentic-operator setup` or add the key to {}",
+        default_store.display()
+    );
 }
 
 fn payload_contains_secret_error(value: &JsonValue) -> bool {
@@ -2867,7 +3019,6 @@ fn gather_missing_secret_uris(
     tenant: &str,
     team: Option<&str>,
     pack_path: &Path,
-    pack_id: &str,
     provider_id: &str,
     store_path: Option<&Path>,
     using_env_fallback: bool,
@@ -2879,7 +3030,6 @@ fn gather_missing_secret_uris(
         tenant,
         team,
         pack_path,
-        pack_id,
         provider_id,
         provider_type,
         store_path,
@@ -3935,7 +4085,6 @@ fn run_demo_up_setup(
                 allow_missing_setup: true,
                 online: false,
                 secrets_env: Some(env.to_string()),
-                secrets_bin: None,
                 runner_binary: runner_binary.clone(),
                 best_effort: false,
                 discovered_providers: None,
@@ -4046,6 +4195,47 @@ fn provider_filter_matches(pack: &domains::ProviderPack, filter: &str) -> bool {
         || file_stem.contains(filter)
 }
 
+pub fn demo_provider_packs(
+    bundle: &Path,
+    domain: Domain,
+) -> anyhow::Result<Vec<domains::ProviderPack>> {
+    let is_demo_bundle = bundle.join("greentic.demo.yaml").exists();
+    if is_demo_bundle {
+        domains::discover_provider_packs_cbor_only(bundle, domain)
+    } else {
+        domains::discover_provider_packs(bundle, domain)
+    }
+}
+
+pub fn demo_provider_pack_by_filter(
+    bundle: &Path,
+    domain: Domain,
+    filter: &str,
+) -> anyhow::Result<domains::ProviderPack> {
+    let mut packs = demo_provider_packs(bundle, domain)?;
+    packs.retain(|pack| provider_filter_matches(pack, filter));
+    if packs.is_empty() {
+        return Err(anyhow::anyhow!(
+            "no provider pack matched {} in {}",
+            filter,
+            domains::domain_name(domain)
+        ));
+    }
+    packs.sort_by(|a, b| a.path.cmp(&b.path));
+    if packs.len() > 1 {
+        let names = packs
+            .iter()
+            .map(|pack| pack.file_name.clone())
+            .collect::<Vec<_>>();
+        return Err(anyhow::anyhow!(
+            "multiple provider packs matched {}; specify a more precise --pack: {}",
+            filter,
+            names.join(", ")
+        ));
+    }
+    Ok(packs.remove(0))
+}
+
 pub(crate) fn resolve_demo_provider_pack(
     root: &Path,
     tenant: &str,
@@ -4153,7 +4343,6 @@ struct DomainRunArgs {
     allow_missing_setup: bool,
     online: bool,
     secrets_env: Option<String>,
-    secrets_bin: Option<PathBuf>,
     runner_binary: Option<PathBuf>,
     best_effort: bool,
     discovered_providers: Option<Vec<discovery::DetectedProvider>>,
@@ -4317,7 +4506,6 @@ fn run_domain_command(args: DomainRunArgs) -> anyhow::Result<()> {
         args.parallel,
         dist_offline,
         args.secrets_env.as_deref(),
-        args.secrets_bin.as_deref(),
         runner_binary,
         args.best_effort,
         provider_map,
@@ -4360,7 +4548,6 @@ fn run_plan(
     parallel: usize,
     dist_offline: bool,
     secrets_env: Option<&str>,
-    secrets_bin: Option<&Path>,
     runner_binary: Option<PathBuf>,
     best_effort: bool,
     provider_map: Option<std::collections::BTreeMap<PathBuf, discovery::DetectedProvider>>,
@@ -4385,7 +4572,6 @@ fn run_plan(
                 &item,
                 dist_offline,
                 secrets_env,
-                secrets_bin,
                 runner_binary.as_deref(),
                 setup_answers.as_deref(),
                 provider_map.as_ref(),
@@ -4420,7 +4606,6 @@ fn run_plan(
         let tenant = tenant.to_string();
         let team = team.map(|value| value.to_string());
         let secrets_env = secrets_env.map(|value| value.to_string());
-        let secrets_bin = secrets_bin.map(|value| value.to_path_buf());
         let runner_binary = runner_binary.clone();
         let provider_map = provider_map.clone();
         let setup_answers = setup_answers.clone();
@@ -4446,7 +4631,6 @@ fn run_plan(
                     &item,
                     dist_offline,
                     secrets_env.as_deref(),
-                    secrets_bin.as_deref(),
                     runner_binary.as_deref(),
                     setup_answers.as_deref(),
                     provider_map.as_ref(),
@@ -4509,7 +4693,6 @@ fn run_plan_item(
     item: &domains::PlannedRun,
     dist_offline: bool,
     secrets_env: Option<&str>,
-    secrets_bin: Option<&Path>,
     runner_binary: Option<&Path>,
     setup_answers: Option<&SetupInputAnswers>,
     provider_map: Option<&std::collections::BTreeMap<PathBuf, discovery::DetectedProvider>>,
@@ -4518,9 +4701,7 @@ fn run_plan_item(
     secrets_manager: Option<DynSecretsManager>,
 ) -> anyhow::Result<()> {
     let provider_id = provider_id_for_pack(&item.pack.path, &item.pack.pack_id, provider_map);
-    let env_value = secrets_env
-        .map(|value| value.to_string())
-        .unwrap_or_else(crate::tools::secrets::resolve_env);
+    let env_value = resolve_env(secrets_env);
 
     if domain == Domain::Messaging
         && action == DomainAction::Setup
@@ -4532,7 +4713,6 @@ fn run_plan_item(
             tenant,
             team,
             &item.pack.path,
-            &item.pack.pack_id,
             &provider_id,
             None,
             None,
@@ -4686,29 +4866,6 @@ fn run_plan_item(
         );
     }
 
-    if domain == Domain::Messaging && action == DomainAction::Setup {
-        let setup_flow = domains::config(domain).setup_flow;
-        if item.flow_id == setup_flow {
-            let Some(secrets_bin) = secrets_bin else {
-                return Ok(());
-            };
-            let status = crate::tools::secrets::run_init(
-                state_root,
-                Some(secrets_bin),
-                &env_value,
-                tenant,
-                team,
-                &item.pack.path,
-                true,
-            )?;
-            if !status.success() {
-                let code = status.code().unwrap_or(1);
-                return Err(anyhow::anyhow!(
-                    "greentic-secrets init failed with exit code {code}"
-                ));
-            }
-        }
-    }
     Ok(())
 }
 

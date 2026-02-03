@@ -389,6 +389,24 @@ impl DemoRunnerHost {
             .await?;
             let provider_type = primary_provider_type(&pack.path)
                 .context("failed to determine provider type for direct invocation")?;
+            let env_value = env::var("GREENTIC_ENV").unwrap_or_else(|_| "<unset>".to_string());
+            let canonical_team = secrets_manager::canonical_team(ctx.team.as_deref()).into_owned();
+            let runner_dev_store_desc = self
+                .secrets_handle
+                .dev_store_path
+                .as_ref()
+                .map(|path| path.display().to_string())
+                .unwrap_or_else(|| "<none>".to_string());
+            eprintln!(
+                "secrets runner ctx: env={} tenant={} canonical_team={} provider_id={} pack_id={} dev_store_path={} using_env_fallback={}",
+                env_value,
+                ctx.tenant,
+                canonical_team,
+                provider_type,
+                pack.pack_id,
+                runner_dev_store_desc,
+                self.secrets_handle.using_env_fallback,
+            );
             let binding = pack_runtime.resolve_provider(None, Some(&provider_type))?;
             let exec_ctx = ComponentExecCtx {
                 tenant: ComponentTenantCtx {

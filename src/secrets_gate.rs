@@ -7,18 +7,21 @@ use std::{
     sync::Arc,
 };
 
-use anyhow::{Context, Result as AnyhowResult, anyhow};
+use anyhow::{Context, Error as AnyhowError, Result as AnyhowResult, anyhow};
 use async_trait::async_trait;
 use greentic_secrets_lib::env::EnvSecretsManager;
 use greentic_secrets_lib::{Result as SecretResult, SecretError, SecretsManager};
 use serde::Deserialize;
 use serde_cbor::value::Value as CborValue;
+use serde_json;
 use tokio::runtime::Builder;
 use tracing::info;
 use zip::{ZipArchive, result::ZipError};
 
 use crate::operator_log;
 use crate::secret_name;
+use crate::secret_value::SecretValue;
+use crate::secrets_backend::SecretsBackendKind;
 use crate::secrets_client::SecretsClient;
 use crate::secrets_manager;
 
@@ -28,7 +31,6 @@ pub type DynSecretsManager = Arc<dyn SecretsManager>;
 
 struct LoggingSecretsManager {
     inner: DynSecretsManager,
-    pack_id: Option<String>,
     dev_store_path_display: String,
     using_env_fallback: bool,
 }
@@ -36,7 +38,6 @@ struct LoggingSecretsManager {
 impl LoggingSecretsManager {
     fn new(
         inner: DynSecretsManager,
-        pack_id: Option<String>,
         dev_store_path: Option<&Path>,
         using_env_fallback: bool,
     ) -> Self {
@@ -45,15 +46,9 @@ impl LoggingSecretsManager {
             .unwrap_or_else(|| "<default>".to_string());
         Self {
             inner,
-            pack_id,
             dev_store_path_display,
             using_env_fallback,
         }
-    }
-
-    fn alias_for(&self, uri: &str) -> Option<String> {
-        let pack_id = self.pack_id.as_deref()?;
-        rewrite_provider_segment(uri, pack_id)
     }
 }
 
@@ -68,16 +63,15 @@ impl SecretsManager for LoggingSecretsManager {
             ),
         );
         match self.inner.read(path).await {
-            Ok(value) => Ok(value),
-            Err(SecretError::NotFound(_)) => {
-                if let Some(alias) = self.alias_for(path) {
-                    operator_log::info(
-                        module_path!(),
-                        format!("WASM secrets alias attempt uri={alias}"),
-                    );
-                    return self.inner.read(&alias).await;
-                }
-                Err(SecretError::NotFound(path.to_string()))
+            Ok(value) => {
+                operator_log::debug(
+                    module_path!(),
+                    format!(
+                        "WASM secrets read resolved uri={path}; value={}",
+                        SecretValue::new(value.as_slice()),
+                    ),
+                );
+                Ok(value)
             }
             Err(err) => Err(err),
         }
@@ -107,10 +101,9 @@ impl SecretsManagerHandle {
         self.manager.clone()
     }
 
-    pub fn runtime_manager(&self, pack_id: Option<&str>) -> DynSecretsManager {
+    pub fn runtime_manager(&self, _pack_id: Option<&str>) -> DynSecretsManager {
         Arc::new(LoggingSecretsManager::new(
             self.manager(),
-            pack_id.map(|id| id.to_string()),
             self.dev_store_path.as_deref(),
             self.using_env_fallback,
         ))
@@ -126,25 +119,59 @@ pub fn resolve_secrets_manager(
     let team_owned = canonical_team.into_owned();
     let selection = secrets_manager::select_secrets_manager(bundle_root, tenant, &team_owned)?;
     let allow_env = matches!(env::var(ENV_ALLOW_ENV_SECRETS).as_deref(), Ok("1"));
-    let (manager, store_path, using_env_fallback) = match SecretsClient::open(bundle_root) {
-        Ok(client) => {
-            let path = client.store_path().map(|path| path.to_path_buf());
-            (Arc::new(client) as DynSecretsManager, path, false)
-        }
-        Err(err) => {
-            if allow_env {
-                operator_log::warn(
-                    module_path!(),
-                    format!(
-                        "dev secrets store unavailable; falling back to env secrets backend: {err}"
-                    ),
-                );
-                (Arc::new(EnvSecretsManager) as DynSecretsManager, None, true)
-            } else {
-                return Err(err);
-            }
-        }
+    let pack_desc = selection
+        .pack_path
+        .as_ref()
+        .map(|path| path.display().to_string())
+        .unwrap_or_else(|| "<none>".to_string());
+    let backend_kind_result = selection.kind();
+    let backend_label = match &backend_kind_result {
+        Ok(kind) => kind.to_string(),
+        Err(_) => "<unknown>".to_string(),
     };
+    let selection_kind_desc = backend_kind_result
+        .as_ref()
+        .map(|kind| kind.to_string())
+        .unwrap_or_else(|err| format!("ERR({err})"));
+    let dev_secrets_path =
+        env::var("GREENTIC_DEV_SECRETS_PATH").unwrap_or_else(|_| "<unset>".to_string());
+    operator_log::info(
+        module_path!(),
+        format!(
+            "secrets selection: kind={} pack_path={} bundle_root={} env_allow_env_secrets={} GREENTIC_DEV_SECRETS_PATH={}",
+            selection_kind_desc,
+            pack_desc,
+            bundle_root.display(),
+            allow_env,
+            dev_secrets_path,
+        ),
+    );
+    let (manager, store_path, using_env_fallback) = instantiate_manager_from_selection(
+        bundle_root,
+        &selection,
+        allow_env,
+        &pack_desc,
+        backend_kind_result,
+    )?;
+    operator_log::info(
+        module_path!(),
+        format!(
+            "secrets runtime backend chosen: dev_store_path={} using_env_fallback={}",
+            store_path
+                .as_ref()
+                .map(|path| path.display().to_string())
+                .unwrap_or_else(|| "<none>".to_string()),
+            using_env_fallback
+        ),
+    );
+    let runtime_dev_store_desc = store_path
+        .as_ref()
+        .map(|path| path.display().to_string())
+        .unwrap_or_else(|| "<none>".to_string());
+    eprintln!(
+        "secrets: backend={} using_env_fallback={} dev_store_path={} selection_pack={} GREENTIC_DEV_SECRETS_PATH={}",
+        backend_label, using_env_fallback, runtime_dev_store_desc, pack_desc, dev_secrets_path,
+    );
     if let Some(pack_path) = &selection.pack_path {
         let dev_store_desc = store_path
             .as_ref()
@@ -153,8 +180,9 @@ pub fn resolve_secrets_manager(
         operator_log::info(
             module_path!(),
             format!(
-                "secrets manager selected: {} (shim: using dev store {})",
+                "secrets manager selected: {} (backend={} dev_store={})",
                 pack_path.display(),
+                backend_label,
                 dev_store_desc
             ),
         );
@@ -168,6 +196,62 @@ pub fn resolve_secrets_manager(
     })
 }
 
+fn instantiate_manager_from_selection(
+    bundle_root: &Path,
+    selection: &secrets_manager::SecretsManagerSelection,
+    allow_env: bool,
+    pack_desc: &str,
+    backend_kind_result: Result<SecretsBackendKind, AnyhowError>,
+) -> AnyhowResult<(DynSecretsManager, Option<PathBuf>, bool)> {
+    match backend_kind_result {
+        Ok(kind) => match instantiate_manager_for_backend(bundle_root, selection, kind) {
+            Ok((manager, path)) => Ok((manager, path, false)),
+            Err(err) => fallback_to_env(allow_env, kind.to_string(), pack_desc, err),
+        },
+        Err(err) => fallback_to_env(allow_env, "<unknown>".to_string(), pack_desc, err),
+    }
+}
+
+fn fallback_to_env(
+    allow_env: bool,
+    kind_label: String,
+    pack_desc: &str,
+    err: AnyhowError,
+) -> AnyhowResult<(DynSecretsManager, Option<PathBuf>, bool)> {
+    if allow_env {
+        operator_log::warn(
+            module_path!(),
+            format!(
+                "secrets backend {kind} ({pack}) failed to initialize; falling back to env secrets backend: {err}",
+                kind = kind_label,
+                pack = pack_desc,
+            ),
+        );
+        Ok((Arc::new(EnvSecretsManager) as DynSecretsManager, None, true))
+    } else {
+        Err(err)
+    }
+}
+
+fn instantiate_manager_for_backend(
+    bundle_root: &Path,
+    _selection: &secrets_manager::SecretsManagerSelection,
+    backend_kind: SecretsBackendKind,
+) -> AnyhowResult<(DynSecretsManager, Option<PathBuf>)> {
+    match backend_kind {
+        SecretsBackendKind::DevStore => open_dev_store_manager(bundle_root),
+        SecretsBackendKind::Env => Ok((Arc::new(EnvSecretsManager) as DynSecretsManager, None)),
+    }
+}
+
+fn open_dev_store_manager(
+    bundle_root: &Path,
+) -> AnyhowResult<(DynSecretsManager, Option<PathBuf>)> {
+    let client = SecretsClient::open(bundle_root)?;
+    let path = client.store_path().map(|path| path.to_path_buf());
+    Ok((Arc::new(client) as DynSecretsManager, path))
+}
+
 /// Build the canonical secrets URI for the provided identity.
 pub fn canonical_secret_uri(
     env: &str,
@@ -177,7 +261,11 @@ pub fn canonical_secret_uri(
     key: &str,
 ) -> String {
     let team_segment = secrets_manager::canonical_team(team);
-    let provider_segment = canonical_namespace(provider).unwrap_or_else(|| "messaging".to_string());
+    let provider_segment = if provider.is_empty() {
+        "messaging".to_string()
+    } else {
+        provider.to_string()
+    };
     let normalized_key = secret_name::canonical_secret_name(key);
     format!(
         "secrets://{}/{}/{}/{}/{}",
@@ -185,16 +273,45 @@ pub fn canonical_secret_uri(
     )
 }
 
+pub fn canonical_secret_store_key(uri: &str) -> Option<String> {
+    let trimmed = uri.strip_prefix("secrets://")?;
+    let segments: Vec<&str> = trimmed.split('/').collect();
+    if segments.len() != 5 {
+        return None;
+    }
+    let normalized = segments
+        .into_iter()
+        .map(|segment| normalize_store_segment(segment))
+        .collect::<Vec<_>>();
+    let mut parts = vec!["GREENTIC_SECRET".to_string()];
+    parts.extend(normalized);
+    Some(parts.join("__"))
+}
+
+fn normalize_store_segment(segment: &str) -> String {
+    let mut normalized = String::with_capacity(segment.len());
+    for ch in segment.chars() {
+        let replacement = match ch {
+            'A'..='Z' | '0'..='9' => ch,
+            'a'..='z' => ch.to_ascii_uppercase(),
+            '_' => '_',
+            _ => '_',
+        };
+        normalized.push(replacement);
+    }
+    normalized
+}
+
 fn secret_uri_candidates(
     env: &str,
     tenant: &str,
     canonical_team: &str,
     key: &str,
-    pack_id: &str,
+    provider_id: &str,
 ) -> Vec<String> {
     let normalized_key = secret_name::canonical_secret_name(key);
     let prefix = format!("secrets://{}/{}/{}/", env, tenant, canonical_team);
-    vec![format!("{prefix}{pack_id}/{normalized_key}")]
+    vec![format!("{prefix}{provider_id}/{normalized_key}")]
 }
 
 fn display_secret_candidates(
@@ -202,33 +319,11 @@ fn display_secret_candidates(
     tenant: &str,
     canonical_team: &str,
     key: &str,
-    pack_id: &str,
+    provider_id: &str,
 ) -> Vec<String> {
     let normalized_key = secret_name::canonical_secret_name(key);
     let prefix = format!("secrets://{}/{}/{}/", env, tenant, canonical_team);
-    vec![format!("{prefix}{pack_id}/{normalized_key}")]
-}
-
-fn rewrite_provider_segment(uri: &str, pack_id: &str) -> Option<String> {
-    let trimmed = uri.strip_prefix("secrets://")?;
-    let mut segments = trimmed.splitn(5, '/').collect::<Vec<_>>();
-    if segments.len() < 5 {
-        return None;
-    }
-    if segments[3] == pack_id {
-        return None;
-    }
-    segments[3] = pack_id;
-    Some(format!("secrets://{}", segments.join("/")))
-}
-
-fn canonical_namespace(value: &str) -> Option<String> {
-    let normalized = secret_name::canonical_secret_key_path(value);
-    if normalized.is_empty() {
-        None
-    } else {
-        Some(normalized)
-    }
+    vec![format!("{prefix}{provider_id}/{normalized_key}")]
 }
 
 /// Check that the required secrets for the provider exist.
@@ -239,7 +334,6 @@ pub fn check_provider_secrets(
     tenant: &str,
     team: Option<&str>,
     pack_path: &Path,
-    pack_id: &str,
     provider_id: &str,
     _provider_type: Option<&str>,
     store_path: Option<&Path>,
@@ -279,14 +373,26 @@ pub fn check_provider_secrets(
                 tenant,
                 &canonical_team_owned,
                 &key,
-                pack_id,
+                provider_id,
             );
             let display_candidates = display_secret_candidates(
                 env,
                 tenant,
                 &canonical_team_owned,
                 &key,
-                pack_id,
+                provider_id,
+            );
+            operator_log::info(
+                module_path!(),
+                format!(
+                    "checking secret URIs for provider {}: {}",
+                    provider_id,
+                    candidates
+                        .iter()
+                        .map(|uri| uri.as_str())
+                        .collect::<Vec<_>>()
+                        .join("; ")
+                ),
             );
             if !display_candidates.is_empty() {
                 let candidate_list = display_candidates
@@ -509,14 +615,26 @@ struct AssetSecretRequirement {
 mod tests {
     use super::*;
     use async_trait::async_trait;
+    use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
     use greentic_secrets_lib::Result as SecretResult;
     use greentic_secrets_lib::core::seed::{ApplyOptions, DevStore, apply_seed};
     use greentic_secrets_lib::{SecretFormat, SeedDoc, SeedEntry, SeedValue};
+    use once_cell::sync::Lazy;
+    use rand::TryRngCore;
+    use rand::rngs::OsRng;
     use std::collections::HashMap;
     use std::env;
-    use std::path::PathBuf;
+    use std::fs;
+    use std::fs::File;
+    use std::io::Write;
+    use std::path::{Path, PathBuf};
+    use std::sync::Mutex;
     use tempfile::tempdir;
     use tokio::runtime::Runtime;
+    use zip::ZipWriter;
+    use zip::write::FileOptions;
+
+    static ENV_VAR_LOCK: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
 
     struct FakeManager {
         values: HashMap<String, Vec<u8>>,
@@ -569,7 +687,6 @@ mod tests {
             Some("default"),
             &telegram_pack_path(),
             "messaging-telegram",
-            "messaging-telegram",
             Some("messaging.telegram.bot"),
             None,
             false,
@@ -598,7 +715,6 @@ mod tests {
             None,
             &telegram_pack_path(),
             "messaging-telegram",
-            "messaging-telegram",
             Some("messaging.telegram.bot"),
             None,
             false,
@@ -626,6 +742,7 @@ mod tests {
         let report =
             runtime.block_on(async { apply_seed(&store, &seed, ApplyOptions::default()).await });
         assert_eq!(report.ok, 1);
+        let env_guard = ENV_VAR_LOCK.lock().unwrap();
         unsafe {
             env::set_var("GREENTIC_DEV_SECRETS_PATH", store_path.clone());
         }
@@ -633,13 +750,13 @@ mod tests {
         unsafe {
             env::remove_var("GREENTIC_DEV_SECRETS_PATH");
         }
+        drop(env_guard);
         let missing = check_provider_secrets(
             &handle.manager(),
             "demo",
             "3point",
             Some("default"),
             &telegram_pack_path(),
-            "messaging-telegram",
             "messaging-telegram",
             Some("messaging.telegram.bot"),
             handle.dev_store_path.as_deref(),
@@ -668,6 +785,7 @@ mod tests {
         let report =
             runtime.block_on(async { apply_seed(&store, &seed, ApplyOptions::default()).await });
         assert_eq!(report.ok, 1);
+        let env_guard = ENV_VAR_LOCK.lock().unwrap();
         unsafe {
             env::set_var("GREENTIC_DEV_SECRETS_PATH", store_path);
         }
@@ -675,13 +793,13 @@ mod tests {
         unsafe {
             env::remove_var("GREENTIC_DEV_SECRETS_PATH");
         }
+        drop(env_guard);
         let missing = check_provider_secrets(
             &handle.manager(),
             "demo",
             "3point",
             Some("default"),
             &telegram_pack_path(),
-            "messaging-telegram",
             "messaging-telegram",
             Some("messaging.telegram.bot"),
             handle.dev_store_path.as_deref(),
@@ -710,6 +828,7 @@ mod tests {
         let report =
             runtime.block_on(async { apply_seed(&store, &seed, ApplyOptions::default()).await });
         assert_eq!(report.ok, 1);
+        let env_guard = ENV_VAR_LOCK.lock().unwrap();
         unsafe {
             env::set_var("GREENTIC_DEV_SECRETS_PATH", store_path.clone());
         }
@@ -717,6 +836,7 @@ mod tests {
         unsafe {
             env::remove_var("GREENTIC_DEV_SECRETS_PATH");
         }
+        drop(env_guard);
         let value = runtime.block_on(async {
             handle
                 .manager()
@@ -726,5 +846,129 @@ mod tests {
         assert_eq!(value, b"token".to_vec());
         assert_eq!(handle.dev_store_path.as_deref(), Some(store_path.as_path()));
         Ok(())
+    }
+
+    #[test]
+    fn dev_store_selection_uses_secrets_client() -> anyhow::Result<()> {
+        let bundle_root = tempdir()?;
+        let handle = resolve_secrets_manager(bundle_root.path(), "demo", Some("default"))?;
+        assert!(handle.dev_store_path.is_some());
+        assert!(!handle.using_env_fallback);
+        Ok(())
+    }
+
+    #[test]
+    fn resolve_secrets_manager_defaults_to_devstore_when_no_pack() -> anyhow::Result<()> {
+        let bundle_root = tempdir()?;
+        let handle = resolve_secrets_manager(bundle_root.path(), "demo", Some("default"))?;
+        assert!(handle.selection.pack_path.is_none());
+        assert!(handle.dev_store_path.is_some());
+        assert!(!handle.using_env_fallback);
+        Ok(())
+    }
+
+    #[test]
+    fn env_selection_pack_uses_env_manager() -> anyhow::Result<()> {
+        let bundle_root = tempdir()?;
+        let tenant = "demo";
+        let team = "default";
+        let pack_dir = secrets_pack_dir(bundle_root.path(), tenant, team);
+        let pack_path =
+            write_secrets_pack(&pack_dir, "env-backend.gtpack", r#"{"backend":"env"}"#)?;
+        let handle = resolve_secrets_manager(bundle_root.path(), tenant, Some(team))?;
+        assert_eq!(
+            handle.selection.pack_path.as_deref(),
+            Some(pack_path.as_path())
+        );
+        assert!(handle.dev_store_path.is_none());
+        assert!(!handle.using_env_fallback);
+        let secret_value = random_secret_value();
+        let expected_bytes = secret_value.clone().into_bytes();
+        let secret_uri = canonical_secret_uri(
+            "demo",
+            tenant,
+            Some(team),
+            "messaging-webex",
+            "webex_bot_token",
+        );
+        let runtime = Runtime::new()?;
+        {
+            let _env_guard = ENV_VAR_LOCK.lock().unwrap();
+            unsafe {
+                env::set_var(&secret_uri, secret_value);
+            }
+            let value = runtime.block_on(async { handle.manager().read(&secret_uri).await })?;
+            unsafe {
+                env::remove_var(&secret_uri);
+            }
+            assert_eq!(value, expected_bytes);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn resolve_secrets_manager_env_fallback_only_when_allowed() -> anyhow::Result<()> {
+        let bundle_root = tempdir()?;
+        let tenant = "demo";
+        let team = "default";
+        let pack_dir = secrets_pack_dir(bundle_root.path(), tenant, team);
+        let _ = write_secrets_pack(&pack_dir, "bad-backend.gtpack", r#"{"backend":"vault"}"#)?;
+        let env_guard = ENV_VAR_LOCK.lock().unwrap();
+        unsafe {
+            env::remove_var(ENV_ALLOW_ENV_SECRETS);
+        }
+        let result = resolve_secrets_manager(bundle_root.path(), tenant, Some(team));
+        drop(env_guard);
+        assert!(result.is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn resolve_secrets_manager_env_fallback_is_allowed_with_flag() -> anyhow::Result<()> {
+        let bundle_root = tempdir()?;
+        let tenant = "demo";
+        let team = "default";
+        let pack_dir = secrets_pack_dir(bundle_root.path(), tenant, team);
+        let _ = write_secrets_pack(&pack_dir, "bad-backend.gtpack", r#"{"backend":"vault"}"#)?;
+        let env_guard = ENV_VAR_LOCK.lock().unwrap();
+        unsafe {
+            env::set_var(ENV_ALLOW_ENV_SECRETS, "1");
+        }
+        let handle = resolve_secrets_manager(bundle_root.path(), tenant, Some(team))?;
+        unsafe {
+            env::remove_var(ENV_ALLOW_ENV_SECRETS);
+        }
+        drop(env_guard);
+        assert!(handle.dev_store_path.is_none());
+        assert!(handle.using_env_fallback);
+        Ok(())
+    }
+
+    fn write_secrets_pack(dir: &Path, name: &str, backend_config: &str) -> anyhow::Result<PathBuf> {
+        fs::create_dir_all(dir)?;
+        let pack_path = dir.join(name);
+        let file = File::create(&pack_path)?;
+        let mut zip = ZipWriter::new(file);
+        let options: FileOptions<'_, ()> = FileOptions::default();
+        zip.start_file("assets/secrets_backend.json", options)?;
+        zip.write_all(backend_config.as_bytes())?;
+        zip.finish()?;
+        Ok(pack_path)
+    }
+
+    fn secrets_pack_dir(bundle_root: &Path, tenant: &str, team: &str) -> PathBuf {
+        let canonical_team = secrets_manager::canonical_team(Some(team)).into_owned();
+        bundle_root
+            .join("providers")
+            .join("secrets")
+            .join(tenant)
+            .join(canonical_team)
+    }
+
+    fn random_secret_value() -> String {
+        let mut bytes = [0u8; 32];
+        OsRng.try_fill_bytes(&mut bytes).expect("OsRng fill failed");
+        let encoded = URL_SAFE_NO_PAD.encode(bytes);
+        format!("TEST_OPAQUE_{encoded}")
     }
 }

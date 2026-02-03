@@ -3,6 +3,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
+use anyhow::Context;
 use chrono::{DateTime, Utc};
 use serde::Serialize;
 use serde_json::Value;
@@ -13,8 +14,10 @@ use crate::dev_mode::DevSettingsResolved;
 use crate::operator_log;
 use crate::runner_integration;
 use crate::runtime_state::RuntimePaths;
+use crate::secrets_setup::{SecretsSetup, resolve_env};
 use crate::setup_input::{SetupInputAnswers, collect_setup_answers, load_setup_input};
 use greentic_runner_desktop::{RunResult, RunStatus};
+use tokio::runtime::Builder;
 
 pub struct ProviderSetupOptions {
     pub providers: Option<Vec<String>>,
@@ -40,10 +43,26 @@ pub fn run_provider_setup(
     }
 
     let runner = resolve_runner_binary(config_dir, dev_settings.as_ref(), options.runner_binary)?;
-    let secrets_bin = if options.skip_secrets_init {
+    let env = resolve_env(None);
+    let secrets_setup = if options.skip_secrets_init {
         None
     } else {
-        Some(resolve_secrets_binary(config_dir, dev_settings.as_ref())?)
+        Some(SecretsSetup::new(
+            config_dir,
+            &env,
+            &config.tenant,
+            Some(&config.team),
+        )?)
+    };
+    let secrets_runtime = if secrets_setup.is_some() {
+        Some(
+            Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .context("build secrets runtime")?,
+        )
+    } else {
+        None
     };
 
     let runtime = RuntimePaths::new(
@@ -66,23 +85,11 @@ pub fn run_provider_setup(
     for (provider, cfg) in providers {
         let result = (|| -> anyhow::Result<()> {
             let pack_path = resolve_pack_path(config_dir, &provider, &cfg)?;
-            if !options.skip_secrets_init {
-                let env = crate::tools::secrets::resolve_env();
-                let status = crate::tools::secrets::run_init(
-                    config_dir,
-                    secrets_bin.as_deref(),
-                    &env,
-                    &config.tenant,
-                    Some(&config.team),
-                    &pack_path,
-                    true,
-                )?;
-                if !status.success() {
-                    let code = status.code().unwrap_or(1);
-                    return Err(anyhow::anyhow!(
-                        "greentic-secrets init failed with exit code {code}"
-                    ));
-                }
+            if let (Some(setup), Some(runtime)) = (secrets_setup.as_ref(), secrets_runtime.as_ref())
+            {
+                runtime
+                    .block_on(async { setup.ensure_pack_secrets(&pack_path, &provider).await })
+                    .with_context(|| format!("seed secrets for provider {provider}"))?;
             }
 
             let setup_path = providers_root.join(format!("{provider}.setup.json"));
@@ -184,20 +191,6 @@ fn resolve_runner_binary(
             config_dir: config_dir.to_path_buf(),
             dev: dev_settings.cloned(),
             explicit_path: explicit,
-        },
-    )
-}
-
-fn resolve_secrets_binary(
-    config_dir: &Path,
-    dev_settings: Option<&DevSettingsResolved>,
-) -> anyhow::Result<PathBuf> {
-    bin_resolver::resolve_binary(
-        "greentic-secrets",
-        &ResolveCtx {
-            config_dir: config_dir.to_path_buf(),
-            dev: dev_settings.cloned(),
-            explicit_path: None,
         },
     )
 }

@@ -1,3 +1,4 @@
+use crate::dev_store_path;
 use anyhow::{Result as AnyhowResult, anyhow};
 use async_trait::async_trait;
 use greentic_secrets_lib::{
@@ -16,17 +17,18 @@ pub struct SecretsClient {
 
 impl SecretsClient {
     pub fn open(bundle_root: &Path) -> AnyhowResult<Self> {
+        let override_path = dev_store_path::override_path();
         if let Some(path) =
-            override_dev_store_path().or_else(|| find_default_dev_store_path(bundle_root))
-            && path.exists()
+            dev_store_path::find_existing_with_override(bundle_root, override_path.as_deref())
         {
             return Self::open_with_path(path);
         }
-        let store = DevStore::open_default()
+        let store_path = dev_store_path::ensure_path(bundle_root)?;
+        let store = DevStore::with_path(store_path.clone())
             .map_err(|err| anyhow!("failed to open dev secrets store: {err}"))?;
         Ok(Self {
             store: Arc::new(store),
-            store_path: None,
+            store_path: Some(store_path),
         })
     }
 
@@ -66,20 +68,6 @@ impl SecretsManager for SecretsClient {
             "dev secrets store is read-only".into(),
         ))
     }
-}
-
-fn override_dev_store_path() -> Option<PathBuf> {
-    std::env::var("GREENTIC_DEV_SECRETS_PATH")
-        .ok()
-        .map(PathBuf::from)
-}
-
-fn find_default_dev_store_path(bundle_root: &Path) -> Option<PathBuf> {
-    let candidates = [
-        bundle_root.join(".greentic/dev/.dev.secrets.env"),
-        bundle_root.join(".greentic/state/dev/.dev.secrets.env"),
-    ];
-    candidates.into_iter().find(|path| path.exists())
 }
 
 #[cfg(test)]

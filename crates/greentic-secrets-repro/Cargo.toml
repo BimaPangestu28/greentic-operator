@@ -1,0 +1,16 @@
+[package]
+name = "greentic-secrets-repro"
+version = "0.1.0"
+edition = "2021"
+description = "Minimal repro crate for greentic dev secrets roundtrips."
+license = "MIT"
+
+[dependencies]
+anyhow = "1"
+tempfile = "3.10"
+tokio = { version = "1", features = ["rt", "macros"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
+greentic-secrets-lib = { version = "0.4", features = ["providers-dev"] }
+secret_name = { path = "../../secret_name" }
+uuid = { version = "1", features = ["v4"] }

@@ -6,13 +6,14 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, anyhow};
 
 use crate::operator_log;
+use crate::secrets_backend::{self, SecretsBackendKind};
 
 const OVERRIDE_ENV: &str = "GREENTIC_SECRETS_MANAGER_PACK";
 const DEFAULT_SECRETS_DIR: &str = "providers/secrets";
 
 #[derive(Clone, Debug)]
 pub struct SecretsManagerSelection {
-    pub kind: SelectedKind,
+    pub scope: SelectedKind,
     pub pack_path: Option<PathBuf>,
     pub reason: String,
 }
@@ -31,6 +32,14 @@ impl SecretsManagerSelection {
         match &self.pack_path {
             Some(path) => format!("{} (pack={})", self.reason, path.display()),
             None => self.reason.clone(),
+        }
+    }
+
+    pub fn kind(&self) -> Result<SecretsBackendKind> {
+        if let Some(pack_path) = &self.pack_path {
+            secrets_backend::backend_kind_from_pack(pack_path)
+        } else {
+            Ok(SecretsBackendKind::DevStore)
         }
     }
 }
@@ -52,7 +61,7 @@ pub fn select_secrets_manager(
 ) -> Result<SecretsManagerSelection> {
     if let Some(override_path) = resolve_override(bundle_root)? {
         return Ok(SecretsManagerSelection {
-            kind: SelectedKind::Override,
+            scope: SelectedKind::Override,
             pack_path: Some(override_path.clone()),
             reason: format!("override secrets manager pack {}", override_path.display()),
         });
@@ -76,7 +85,7 @@ pub fn select_secrets_manager(
     for (kind, dir) in &candidate_dirs {
         if let Some(pack) = find_best_pack(dir).context("scan secrets manager packs")? {
             return Ok(SecretsManagerSelection {
-                kind: *kind,
+                scope: *kind,
                 pack_path: Some(pack.clone()),
                 reason: match kind {
                     SelectedKind::TenantTeam => "tenant/team secrets manager pack".to_string(),
@@ -89,7 +98,7 @@ pub fn select_secrets_manager(
     }
 
     Ok(SecretsManagerSelection {
-        kind: SelectedKind::None,
+        scope: SelectedKind::None,
         pack_path: None,
         reason: "no secrets manager pack found".to_string(),
     })
@@ -180,7 +189,7 @@ mod tests {
         let default_pack = base.join("default.gtpack");
         fs::write(&default_pack, "").unwrap();
         let selection = select_secrets_manager(dir.path(), "tenant", "team").unwrap();
-        assert_eq!(selection.kind, SelectedKind::TenantTeam);
+        assert_eq!(selection.scope, SelectedKind::TenantTeam);
         assert_eq!(
             selection.pack_path.unwrap().file_name().unwrap(),
             "foo.gtpack"
@@ -199,7 +208,7 @@ mod tests {
         unsafe {
             env::remove_var(OVERRIDE_ENV);
         }
-        assert_eq!(selection.kind, SelectedKind::Override);
+        assert_eq!(selection.scope, SelectedKind::Override);
         assert_eq!(selection.pack_path.unwrap(), alt);
     }
 }
