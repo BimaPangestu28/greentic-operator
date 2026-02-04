@@ -1,12 +1,8 @@
-use std::{
-    collections::BTreeMap,
-    fs,
-    path::{Path, PathBuf},
-};
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, anyhow};
-use serde::Deserialize;
-use serde_cbor::from_slice;
+
+use crate::domains;
 
 #[derive(Debug, Clone)]
 pub struct DemoPack {
@@ -61,115 +57,12 @@ pub fn resolve_pack(packs_dir: &Path, pack_name: &str) -> Result<DemoPack> {
             packs_dir.display()
         ));
     }
-    let manifest_path = pack_path.join("manifest.cbor");
-    let bytes = fs::read(&manifest_path).with_context(|| {
-        format!(
-            "unable to read manifest.cbor for pack {}",
-            manifest_path.display()
-        )
-    })?;
-    let manifest: Manifest = from_slice(&bytes).with_context(|| {
-        format!(
-            "failed to decode manifest.cbor for pack {}",
-            manifest_path.display()
-        )
-    })?;
-    let pack_id = manifest.pack_id(pack_name);
-    let (entry_flows, source) = manifest.entry_flows();
+    let meta = domains::read_pack_meta(&pack_path)
+        .with_context(|| format!("failed to read manifest for pack {}", pack_path.display()))?;
     Ok(DemoPack {
-        pack_id,
+        pack_id: meta.pack_id.clone(),
         pack_path,
-        entry_flows,
-        default_flow_source: source,
+        entry_flows: meta.entry_flows.clone(),
+        default_flow_source: EntryFlowSource::MetaEntryFlows,
     })
-}
-
-#[derive(Debug, Deserialize)]
-struct Manifest {
-    #[serde(default)]
-    pack_id: Option<String>,
-    #[serde(default)]
-    meta: Option<ManifestMeta>,
-    #[serde(default)]
-    flows: Vec<ManifestFlow>,
-}
-
-#[derive(Debug, Deserialize)]
-struct ManifestMeta {
-    #[serde(default)]
-    pack_id: Option<String>,
-    #[serde(default)]
-    entry_flows: Option<EntryFlows>,
-}
-
-#[derive(Debug, Deserialize)]
-struct ManifestFlow {
-    #[serde(default)]
-    id: Option<String>,
-    #[serde(default)]
-    entrypoints: Vec<String>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(untagged)]
-enum EntryFlows {
-    List(Vec<String>),
-    Map(BTreeMap<String, String>),
-}
-
-impl EntryFlows {
-    fn values(&self) -> Vec<String> {
-        match self {
-            EntryFlows::List(list) => list.clone(),
-            EntryFlows::Map(map) => map.values().cloned().collect(),
-        }
-    }
-}
-
-impl Manifest {
-    fn pack_id(&self, fallback: &str) -> String {
-        if let Some(meta) = &self.meta {
-            if let Some(pack_id) = &meta.pack_id {
-                if !pack_id.is_empty() {
-                    return pack_id.clone();
-                }
-            }
-        }
-        if let Some(pack_id) = &self.pack_id {
-            if !pack_id.is_empty() {
-                return pack_id.clone();
-            }
-        }
-        fallback.to_string()
-    }
-
-    fn entry_flows(&self) -> (Vec<String>, EntryFlowSource) {
-        if let Some(meta) = &self.meta {
-            if let Some(entry_flows) = &meta.entry_flows {
-                let values = entry_flows
-                    .values()
-                    .into_iter()
-                    .filter(|value| !value.is_empty())
-                    .collect::<Vec<_>>();
-                if !values.is_empty() {
-                    return (values, EntryFlowSource::MetaEntryFlows);
-                }
-                return (Vec::new(), EntryFlowSource::MetaEntryFlows);
-            }
-        }
-        let mut flows = Vec::new();
-        for manifest_flow in &self.flows {
-            if let Some(id) = manifest_flow.id.as_ref() {
-                if !id.is_empty() {
-                    flows.push(id.clone());
-                }
-            }
-            for entry in &manifest_flow.entrypoints {
-                if !entry.is_empty() {
-                    flows.push(entry.clone());
-                }
-            }
-        }
-        (flows, EntryFlowSource::FlowsList)
-    }
 }

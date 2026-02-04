@@ -52,9 +52,29 @@ impl DemoRunner {
         initial_input: Value,
         secrets_manager: DynSecretsManager,
     ) -> anyhow::Result<Self> {
+        let (entry_flow, pack_id) = select_entry_flow(&pack_path)?;
+        Self::with_entry_flow(
+            pack_path,
+            tenant,
+            team,
+            entry_flow,
+            pack_id,
+            initial_input,
+            secrets_manager,
+        )
+    }
+
+    pub fn with_entry_flow(
+        pack_path: PathBuf,
+        tenant: &str,
+        team: Option<String>,
+        entry_flow: String,
+        pack_id: String,
+        initial_input: Value,
+        secrets_manager: DynSecretsManager,
+    ) -> anyhow::Result<Self> {
         let runtime = Runtime::new().context("build demo runner runtime")?;
         let host_config = Arc::new(build_host_config(tenant));
-        let (entry_flow, pack_id) = select_entry_flow(&pack_path)?;
         Ok(Self {
             pack_path,
             entry_flow,

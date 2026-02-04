@@ -22,7 +22,7 @@ use crate::bin_resolver::{self, ResolveCtx};
 use crate::config;
 use crate::config_gate::{self, ConfigGateItem, ConfigValueSource};
 use crate::demo::{
-    self, BuildOptions,
+    self, BuildOptions, DemoRepl, DemoRunner,
     card::{detect_adaptive_card_view, print_card_summary},
     http_ingress::{HttpIngressConfig, HttpIngressServer},
     input as demo_input, pack_resolve,
@@ -59,6 +59,7 @@ use crate::subscriptions_universal::{
     state_root,
     store::{AuthUserRefV1, SubscriptionStore},
 };
+use greentic_runner_host::secrets::default_manager;
 use greentic_types::{ChannelMessageEnvelope, Destination, EnvId, TeamId, TenantCtx, TenantId};
 use std::time::Duration;
 use uuid::Uuid;
@@ -880,7 +881,7 @@ struct DemoDoctorArgs {
 #[command(
     about = "Send a demo message via a provider pack.",
     long_about = "Runs provider requirements or sends a generic message payload.",
-    after_help = "Main options:\n  --bundle <DIR>\n  --provider <PROVIDER>\n\nOptional options:\n  --text <TEXT>\n  --arg <k=v>...\n  --args-json <JSON>\n  --env <ENV> (default: demo)\n  --tenant <TENANT> (default: demo)\n  --team <TEAM> (default: default)\n  --print-required-args"
+    after_help = "Main options:\n  --bundle <DIR>\n  --provider <PROVIDER>\n\nOptional options:\n  --text <TEXT>\n  --card <FILE>\n  --arg <k=v>...\n  --args-json <JSON>\n  --env <ENV> (default: demo)\n  --tenant <TENANT> (default: demo)\n  --team <TEAM> (default: default)\n  --print-required-args"
 )]
 struct DemoSendArgs {
     #[arg(long)]
@@ -910,6 +911,12 @@ struct DemoSendArgs {
         help = "Optional destination kind (chat, channel, room, email, etc.)."
     )]
     to_kind: Option<String>,
+    #[arg(
+        long,
+        value_name = "FILE",
+        help = "JSON file containing the adaptive card to include in the message."
+    )]
+    card: Option<PathBuf>,
 }
 
 #[derive(Parser)]
@@ -960,6 +967,8 @@ struct DemoSubscriptionsCommand {
 struct DemoRunArgs {
     #[arg(long, default_value = "./packs")]
     packs_dir: PathBuf,
+    #[arg(long)]
+    bundle: Option<PathBuf>,
     #[arg(long)]
     pack: String,
     #[arg(long)]
@@ -1105,7 +1114,12 @@ impl DemoSubscriptionsCommand {
 
 impl DemoRunArgs {
     fn run(self, _ctx: &AppCtx) -> anyhow::Result<()> {
-        let pack = pack_resolve::resolve_pack(&self.packs_dir, &self.pack)?;
+        let packs_dir = self
+            .bundle
+            .clone()
+            .map(|bundle| bundle.join("packs"))
+            .unwrap_or(self.packs_dir);
+        let pack = pack_resolve::resolve_pack(&packs_dir, &self.pack)?;
         let flow_id = pack.select_flow(self.flow.as_deref())?;
         let parsed_input = match self.input {
             Some(value) => Some(demo_input::parse_input(&value)?),
@@ -1128,6 +1142,30 @@ impl DemoRunArgs {
         println!("  tenant: {} team: {}", self.tenant, team_display);
         println!("  flow: {}", flow_id);
         println!("  input: {}", input_desc);
+
+        let initial_input = parsed_input
+            .as_ref()
+            .map(|parsed| parsed.value.clone())
+            .unwrap_or_else(|| json!({}));
+        let secrets_manager = if let Some(bundle) = &self.bundle {
+            let secrets_handle =
+                secrets_gate::resolve_secrets_manager(bundle, &self.tenant, self.team.as_deref())?;
+            secrets_handle.runtime_manager(Some(&pack.pack_id))
+        } else {
+            default_manager()?
+        };
+        let runner = DemoRunner::with_entry_flow(
+            pack.pack_path.clone(),
+            &self.tenant,
+            self.team.clone(),
+            flow_id.clone(),
+            pack.pack_id.clone(),
+            initial_input,
+            secrets_manager,
+        )?;
+        let mut repl = DemoRepl::new(runner);
+        println!("Entering interactive mode (type @help for commands).");
+        repl.run()?;
         Ok(())
     }
 }
@@ -1135,19 +1173,67 @@ impl DemoRunArgs {
 impl DemoListPacksArgs {
     fn run(self, _ctx: &AppCtx) -> anyhow::Result<()> {
         let domain = Domain::from(self.domain);
+        let cfg = domains::config(domain);
         let packs = demo_provider_packs(&self.bundle, domain)?;
-        if packs.is_empty() {
-            println!("no packs found for domain {:?}", domain);
-            return Ok(());
-        }
-        println!("packs for {}:", domains::domain_name(domain));
+        let providers_root = self.bundle.join(cfg.providers_dir);
+        let apps_root = self.bundle.join("packs");
+        let mut provider_packs = Vec::new();
+        let mut app_packs = Vec::new();
         for pack in packs {
-            println!(
-                "  {} ({} entry flows) {}",
-                pack.pack_id,
-                pack.entry_flows.len(),
-                pack.file_name
-            );
+            if pack.path.starts_with(&providers_root) {
+                provider_packs.push(pack);
+            } else if pack.path.starts_with(&apps_root) {
+                app_packs.push(pack);
+            } else {
+                provider_packs.push(pack);
+            }
+        }
+
+        if provider_packs.is_empty() {
+            println!("no packs found for domain {:?}", domain);
+        } else {
+            println!("packs for {}:", domains::domain_name(domain));
+            for pack in &provider_packs {
+                println!(
+                    "  {} ({} entry flows) {}",
+                    pack.pack_id,
+                    pack.entry_flows.len(),
+                    pack.file_name
+                );
+            }
+        }
+
+        if !app_packs.is_empty() {
+            if !provider_packs.is_empty() {
+                println!();
+            }
+            println!("packs for applications:");
+            for pack in app_packs {
+                let relative = pack
+                    .path
+                    .strip_prefix(&apps_root)
+                    .unwrap_or_else(|_| Path::new(&pack.file_name));
+                let mut trimmed = relative.to_string_lossy().to_string();
+                if let Some(stripped) = trimmed.strip_suffix(".gtpack") {
+                    trimmed = stripped.to_string();
+                }
+                let has_parent = relative
+                    .parent()
+                    .map(|parent| !parent.as_os_str().is_empty())
+                    .unwrap_or(false);
+                let display_name = if has_parent {
+                    format!("/{trimmed}")
+                } else {
+                    trimmed
+                };
+                let depth = relative.components().count().saturating_sub(1);
+                let indent = " ".repeat(depth);
+                println!(
+                    "  {indent}{display_name} ({} entry flows) {}",
+                    pack.entry_flows.len(),
+                    pack.file_name
+                );
+            }
         }
         Ok(())
     }
@@ -2669,10 +2755,26 @@ impl DemoSendArgs {
             return Ok(());
         }
 
-        let text = self
-            .text
-            .clone()
-            .ok_or_else(|| anyhow::anyhow!("--text is required unless --print-required-args"))?;
+        let card_payload = if let Some(path) = &self.card {
+            let contents = fs::read_to_string(path)
+                .with_context(|| format!("failed to read card file {}", path.display()))?;
+            Some(
+                serde_json::from_str::<JsonValue>(&contents)
+                    .with_context(|| format!("failed to parse card file {}", path.display()))?,
+            )
+        } else {
+            None
+        };
+        let mut text_value = self.text.clone();
+        if text_value.is_none() && card_payload.is_some() {
+            text_value = Some("adaptive card".to_string());
+        }
+        let text_ref = text_value.as_deref();
+        if text_ref.is_none() && card_payload.is_none() {
+            return Err(anyhow::anyhow!(
+                "either --text or --card is required unless --print-required-args"
+            ));
+        }
         let args = merge_args(self.args_json.as_deref(), &self.args)?;
         let mut config_items = Vec::new();
         config_items.push(ConfigGateItem::new(
@@ -2694,12 +2796,22 @@ impl DemoSendArgs {
             ConfigValueSource::Platform("team"),
             true,
         ));
-        config_items.push(ConfigGateItem::new(
-            "text",
-            Some(text.clone()),
-            ConfigValueSource::Argument("--text"),
-            true,
-        ));
+        if let Some(text) = &text_value {
+            config_items.push(ConfigGateItem::new(
+                "text",
+                Some(text.clone()),
+                ConfigValueSource::Argument("--text"),
+                true,
+            ));
+        }
+        if let Some(card_path) = &self.card {
+            config_items.push(ConfigGateItem::new(
+                "card",
+                Some(card_path.display().to_string()),
+                ConfigValueSource::Argument("--card"),
+                true,
+            ));
+        }
         let mut arg_entries = args.iter().collect::<Vec<_>>();
         arg_entries.sort_by(|(a, _), (b, _)| a.cmp(b));
         for (key, value) in arg_entries {
@@ -2729,7 +2841,7 @@ impl DemoSendArgs {
         config_gate::log_config_gate(Domain::Messaging, &self.tenant, team, &env, &config_items);
         let channel = provider_channel(&self.provider);
         let message = build_demo_send_message(
-            &text,
+            text_ref,
             &args,
             &self.tenant,
             team,
@@ -2737,6 +2849,7 @@ impl DemoSendArgs {
             self.to_kind.as_deref(),
             &self.provider,
             &channel,
+            card_payload.as_ref(),
         );
         debug_print_envelope("initial message", &message);
 
@@ -5163,7 +5276,7 @@ fn merge_args(
 }
 
 fn build_demo_send_message(
-    text: &str,
+    text: Option<&str>,
     args: &JsonMap<String, JsonValue>,
     tenant: &str,
     team: Option<&str>,
@@ -5171,8 +5284,14 @@ fn build_demo_send_message(
     to_kind: Option<&str>,
     provider_id: &str,
     channel: &str,
+    card: Option<&JsonValue>,
 ) -> JsonValue {
     let mut metadata = BTreeMap::new();
+    if let Some(card_value) = card {
+        if let Ok(card_str) = serde_json::to_string(card_value) {
+            metadata.insert("adaptive_card".to_string(), card_str);
+        }
+    }
     for (key, value) in args {
         metadata.insert(key.clone(), value.to_string());
     }
@@ -5211,7 +5330,7 @@ fn build_demo_send_message(
         from: None,
         to,
         correlation_id: None,
-        text: Some(text.to_string()),
+        text: text.map(|value| value.to_string()),
         attachments: Vec::new(),
         metadata,
     };

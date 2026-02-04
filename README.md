@@ -55,6 +55,7 @@ Demo send (generic)
 
 greentic-operator demo send --bundle demo-bundle --provider telegram --print-required-args
 greentic-operator demo send --bundle demo-bundle --provider telegram --text "hi" --arg chat_id=123
+greentic-operator demo send --bundle demo-bundle --provider telegram --card cards/welcome.json --arg chat_id=123
 
 Demo new (bundle scaffold)
 

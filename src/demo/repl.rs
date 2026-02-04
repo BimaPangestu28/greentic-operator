@@ -1,9 +1,11 @@
 use std::{
     collections::HashMap,
+    error::Error,
+    fmt,
     io::{self, BufRead},
 };
 
-use anyhow::{Context, Result, anyhow};
+use anyhow::{Context, Result};
 use serde_json::Value as JsonValue;
 
 use crate::demo::{
@@ -14,6 +16,17 @@ use crate::demo::{
     runner::DemoRunner,
     types::{DemoBlockedOn, UserEvent},
 };
+
+#[derive(Debug)]
+struct DemoReplQuit;
+
+impl fmt::Display for DemoReplQuit {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "user requested exit")
+    }
+}
+
+impl Error for DemoReplQuit {}
 
 pub struct DemoRepl {
     runner: DemoRunner,
@@ -49,7 +62,15 @@ impl DemoRepl {
                         self.history.push(snapshot);
                         self.last_output = Some(output.clone());
                         print_card_summary(card);
-                        self.command_loop()?;
+                        match self.command_loop() {
+                            Ok(_) => {}
+                            Err(err) => {
+                                if err.downcast_ref::<DemoReplQuit>().is_some() {
+                                    return Ok(());
+                                }
+                                return Err(err);
+                            }
+                        }
                     } else {
                         if let Some(reason) = reason {
                             println!("Waiting for input: {reason}");
@@ -107,7 +128,7 @@ impl DemoRepl {
                     print_help();
                 }
                 Ok(DemoCommand::Quit) => {
-                    return Err(anyhow!("user requested exit"));
+                    return Err(DemoReplQuit.into());
                 }
                 Ok(DemoCommand::Input { field, value }) => {
                     if let Some(card) = &self.current_card {
