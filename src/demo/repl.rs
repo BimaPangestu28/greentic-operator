@@ -131,27 +131,27 @@ impl DemoRepl {
                     return Err(DemoReplQuit.into());
                 }
                 Ok(DemoCommand::Input { field, value }) => {
-                    if let Some(card) = &self.current_card {
-                        if !card.inputs.iter().any(|input| input.id == field) {
-                            println!(
-                                "Unknown input '{field}'. Available inputs: {}",
-                                self.list_input_ids(card)
-                            );
-                            continue;
-                        }
+                    if let Some(card) = &self.current_card
+                        && !card.inputs.iter().any(|input| input.id == field)
+                    {
+                        println!(
+                            "Unknown input '{field}'. Available inputs: {}",
+                            self.list_input_ids(card)
+                        );
+                        continue;
                     }
                     self.pending_inputs.insert(field.clone(), value.clone());
                     println!("Set {field}={value}");
                 }
                 Ok(DemoCommand::Click { action_id }) => {
-                    if let Some(card) = &self.current_card {
-                        if !card.actions.iter().any(|action| action.id == action_id) {
-                            println!(
-                                "Unknown action '{action_id}'. Available actions: {}",
-                                self.list_action_ids(card)
-                            );
-                            continue;
-                        }
+                    if let Some(card) = &self.current_card
+                        && !card.actions.iter().any(|action| action.id == action_id)
+                    {
+                        println!(
+                            "Unknown action '{action_id}'. Available actions: {}",
+                            self.list_action_ids(card)
+                        );
+                        continue;
                     }
                     let fields = self
                         .pending_inputs

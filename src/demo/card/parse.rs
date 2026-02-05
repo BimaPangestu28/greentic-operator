@@ -79,13 +79,13 @@ pub fn detect_adaptive_card_view(value: &JsonValue) -> Option<CardView> {
     let inputs = card
         .get("body")
         .and_then(JsonValue::as_array)
-        .map(|items| items.iter().filter_map(|item| parse_input(item)).collect())
+        .map(|items| items.iter().filter_map(parse_input).collect())
         .unwrap_or_default();
 
     let actions = card
         .get("actions")
         .and_then(JsonValue::as_array)
-        .map(|items| items.iter().filter_map(|item| parse_action(item)).collect())
+        .map(|items| items.iter().filter_map(parse_action).collect())
         .unwrap_or_default();
 
     Some(CardView {
@@ -106,16 +106,16 @@ fn extract_card_object(value: &JsonValue) -> Option<&JsonValue> {
         if let Some(card) = payload.get("card") {
             return card.as_object().map(|_| card);
         }
-        if let Some(outputs) = payload.get("outputs") {
-            if let Some(card) = outputs.get("card") {
-                return card.as_object().map(|_| card);
-            }
-        }
-    }
-    if let Some(outputs) = value.get("outputs") {
-        if let Some(card) = outputs.get("card") {
+        if let Some(outputs) = payload.get("outputs")
+            && let Some(card) = outputs.get("card")
+        {
             return card.as_object().map(|_| card);
         }
+    }
+    if let Some(outputs) = value.get("outputs")
+        && let Some(card) = outputs.get("card")
+    {
+        return card.as_object().map(|_| card);
     }
     if value
         .get("type")

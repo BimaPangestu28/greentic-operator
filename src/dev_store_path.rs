@@ -23,17 +23,14 @@ pub fn find_existing_with_override(
     bundle_root: &Path,
     override_path: Option<&Path>,
 ) -> Option<PathBuf> {
-    if let Some(path) = override_path {
-        if path.exists() {
-            return Some(path.to_path_buf());
-        }
+    if let Some(path) = override_path
+        && path.exists()
+    {
+        return Some(path.to_path_buf());
     }
-    for candidate in candidate_paths(bundle_root) {
-        if candidate.exists() {
-            return Some(candidate);
-        }
-    }
-    None
+    candidate_paths(bundle_root)
+        .into_iter()
+        .find(|candidate| candidate.exists())
 }
 
 /// Ensures the default dev store path exists (creating parent directories) before returning it.

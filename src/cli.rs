@@ -81,7 +81,7 @@ pub struct Cli {
 enum Command {
     #[command(hide = true)]
     Dev(DevCommand),
-    Demo(DemoCommand),
+    Demo(Box<DemoCommand>),
 }
 
 #[derive(Parser)]
@@ -2840,17 +2840,17 @@ impl DemoSendArgs {
         }
         config_gate::log_config_gate(Domain::Messaging, &self.tenant, team, &env, &config_items);
         let channel = provider_channel(&self.provider);
-        let message = build_demo_send_message(
-            text_ref,
-            &args,
-            &self.tenant,
+        let message = build_demo_send_message(DemoSendMessageArgs {
+            text: text_ref,
+            args: &args,
+            tenant: &self.tenant,
             team,
-            &self.to,
-            self.to_kind.as_deref(),
-            &self.provider,
-            &channel,
-            card_payload.as_ref(),
-        );
+            destinations: &self.to,
+            to_kind: self.to_kind.as_deref(),
+            provider_id: &self.provider,
+            channel: &channel,
+            card: card_payload.as_ref(),
+        });
         debug_print_envelope("initial message", &message);
 
         // Compose a message plan and encode payload directly against the provider component (no flow resolution).
@@ -3013,10 +3013,10 @@ fn run_provider_component_op(
         ctx,
     )?;
     ensure_provider_op_success(provider_id, op, &outcome)?;
-    if let Some(value) = &outcome.output {
-        if let Some(card) = detect_adaptive_card_view(value) {
-            print_card_summary(&card);
-        }
+    if let Some(value) = &outcome.output
+        && let Some(card) = detect_adaptive_card_view(value)
+    {
+        print_card_summary(&card);
     }
     Ok(outcome)
 }
@@ -5275,33 +5275,35 @@ fn merge_args(
     Ok(merged)
 }
 
-fn build_demo_send_message(
-    text: Option<&str>,
-    args: &JsonMap<String, JsonValue>,
-    tenant: &str,
-    team: Option<&str>,
-    destinations: &[String],
-    to_kind: Option<&str>,
-    provider_id: &str,
-    channel: &str,
-    card: Option<&JsonValue>,
-) -> JsonValue {
+struct DemoSendMessageArgs<'a> {
+    text: Option<&'a str>,
+    args: &'a JsonMap<String, JsonValue>,
+    tenant: &'a str,
+    team: Option<&'a str>,
+    destinations: &'a [String],
+    to_kind: Option<&'a str>,
+    provider_id: &'a str,
+    channel: &'a str,
+    card: Option<&'a JsonValue>,
+}
+
+fn build_demo_send_message(args: DemoSendMessageArgs<'_>) -> JsonValue {
     let mut metadata = BTreeMap::new();
-    if let Some(card_value) = card {
-        if let Ok(card_str) = serde_json::to_string(card_value) {
-            metadata.insert("adaptive_card".to_string(), card_str);
-        }
+    if let Some(card_value) = args.card
+        && let Ok(card_str) = serde_json::to_string(card_value)
+    {
+        metadata.insert("adaptive_card".to_string(), card_str);
     }
-    for (key, value) in args {
+    for (key, value) in args.args {
         metadata.insert(key.clone(), value.to_string());
     }
     let env_value = std::env::var("GREENTIC_ENV").unwrap_or_else(|_| "local".to_string());
     let env = EnvId::try_from(env_value.clone())
         .unwrap_or_else(|_| EnvId::try_from("local").expect("local env invalid"));
-    let tenant_id = TenantId::try_from(tenant.to_string())
+    let tenant_id = TenantId::try_from(args.tenant.to_string())
         .unwrap_or_else(|_| TenantId::try_from("demo").expect("demo tenant invalid"));
     let mut tenant_ctx = TenantCtx::new(env, tenant_id.clone());
-    if let Some(team_value) = team
+    if let Some(team_value) = args.team
         && let Ok(team_id) = TeamId::try_from(team_value.to_string())
     {
         tenant_ctx = tenant_ctx.with_team(Some(team_id));
@@ -5310,11 +5312,12 @@ fn build_demo_send_message(
         .with_session(Uuid::new_v4().to_string())
         .with_flow(Uuid::new_v4().to_string())
         .with_node("demo".to_string())
-        .with_provider(provider_id.to_string())
+        .with_provider(args.provider_id.to_string())
         .with_attempt(1);
 
-    let to_kind_owned = to_kind.map(|value| value.to_string());
-    let to = destinations
+    let to_kind_owned = args.to_kind.map(|value| value.to_string());
+    let to = args
+        .destinations
         .iter()
         .map(|value| Destination {
             id: value.clone(),
@@ -5324,13 +5327,13 @@ fn build_demo_send_message(
     let envelope = ChannelMessageEnvelope {
         id: Uuid::new_v4().to_string(),
         tenant: tenant_ctx,
-        channel: channel.to_string(),
+        channel: args.channel.to_string(),
         session_id: Uuid::new_v4().to_string(),
         reply_scope: None,
         from: None,
         to,
         correlation_id: None,
-        text: text.map(|value| value.to_string()),
+        text: args.text.map(|value| value.to_string()),
         attachments: Vec::new(),
         metadata,
     };

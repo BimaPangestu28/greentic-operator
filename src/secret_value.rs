@@ -25,6 +25,10 @@ impl<'a> SecretValue<'a> {
     pub fn len(&self) -> usize {
         self.inner.len()
     }
+
+    pub fn is_empty(&self) -> bool {
+        self.inner.is_empty()
+    }
 }
 
 impl<'a> From<&'a [u8]> for SecretValue<'a> {

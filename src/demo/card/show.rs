@@ -16,7 +16,7 @@ pub fn print_card_summary(view: &CardView) {
     if !view.inputs.is_empty() {
         println!("  inputs:");
         for input in &view.inputs {
-            let label = input.label.as_deref().unwrap_or_else(|| input.id.as_str());
+            let label = input.label.as_deref().unwrap_or(input.id.as_str());
             let type_desc = input.input_type.as_deref().unwrap_or("input");
             println!("    - {label} (id={}: type={type_desc})", input.id);
             if let Some(placeholder) = input.placeholder.as_deref() {

@@ -281,7 +281,7 @@ pub fn canonical_secret_store_key(uri: &str) -> Option<String> {
     }
     let normalized = segments
         .into_iter()
-        .map(|segment| normalize_store_segment(segment))
+        .map(normalize_store_segment)
         .collect::<Vec<_>>();
     let mut parts = vec!["GREENTIC_SECRET".to_string()];
     parts.extend(normalized);

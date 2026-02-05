@@ -442,7 +442,7 @@ fn build_pack_meta(manifest: &PackManifest, path: &Path) -> PackMeta {
     let pack_id = manifest
         .meta
         .as_ref()
-        .and_then(|meta| Some(meta.pack_id.clone()))
+        .map(|meta| meta.pack_id.clone())
         .or_else(|| manifest.pack_id.clone())
         .unwrap_or_else(|| {
             let fallback = path
@@ -461,7 +461,7 @@ fn build_pack_meta(manifest: &PackManifest, path: &Path) -> PackMeta {
         .meta
         .as_ref()
         .map(|meta| meta.entry_flows.clone())
-        .unwrap_or_else(Vec::new);
+        .unwrap_or_default();
     if entry_flows.is_empty() {
         for flow in &manifest.flows {
             entry_flows.push(flow.id.clone());

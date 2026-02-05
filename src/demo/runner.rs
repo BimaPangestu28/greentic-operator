@@ -108,7 +108,7 @@ impl DemoRunner {
                     self.snapshot = Some(snapshot.clone());
                     DemoBlockedOn::Waiting {
                         reason: wait.reason,
-                        snapshot,
+                        snapshot: Box::new(snapshot),
                         output: execution.output,
                     }
                 }

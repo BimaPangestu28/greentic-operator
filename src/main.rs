@@ -1,7 +1,6 @@
 use clap::Parser;
 use greentic_operator::cli;
 use std::env;
-use tracing_subscriber;
 
 fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt::init();

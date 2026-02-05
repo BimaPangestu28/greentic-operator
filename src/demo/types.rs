@@ -8,7 +8,7 @@ pub enum DemoBlockedOn {
     /// The flow is waiting for an external input before continuing.
     Waiting {
         reason: Option<String>,
-        snapshot: FlowSnapshot,
+        snapshot: Box<FlowSnapshot>,
         output: Value,
     },
     /// The flow finished and produced a terminal output value.
