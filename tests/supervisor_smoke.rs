@@ -21,10 +21,22 @@ fn supervisor_spawns_and_stops_service() {
     };
 
     let handle = spawn_service(&paths, spec, None).unwrap();
-    std::thread::sleep(std::time::Duration::from_millis(100));
-
-    let log_contents = std::fs::read_to_string(handle.log_path).unwrap();
-    assert!(log_contents.contains("ready"));
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    let mut log_contents = String::new();
+    while std::time::Instant::now() < deadline {
+        if let Ok(contents) = std::fs::read_to_string(&handle.log_path) {
+            if contents.contains("ready") {
+                log_contents = contents;
+                break;
+            }
+            log_contents = contents;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    assert!(
+        log_contents.contains("ready"),
+        "expected ready in log, got: {log_contents}"
+    );
 
     let statuses = read_status(&paths).unwrap();
     assert_eq!(statuses.len(), 1);

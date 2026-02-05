@@ -635,6 +635,12 @@ mod tests {
     use zip::write::FileOptions;
 
     static ENV_VAR_LOCK: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
+    static PACK_FIXTURE: Lazy<PackFixture> = Lazy::new(build_test_pack);
+
+    struct PackFixture {
+        _dir: tempfile::TempDir,
+        path: PathBuf,
+    }
 
     struct FakeManager {
         values: HashMap<String, Vec<u8>>,
@@ -668,7 +674,24 @@ mod tests {
         let mut path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         path.push("..");
         path.push("tests/demo-bundle/providers/messaging/messaging-telegram.gtpack");
-        path.canonicalize().unwrap_or(path)
+        if path.exists() {
+            return path.canonicalize().unwrap_or(path);
+        }
+        PACK_FIXTURE.path.clone()
+    }
+
+    fn build_test_pack() -> PackFixture {
+        let dir = tempdir().expect("create temp dir for test pack");
+        let path = dir.path().join("messaging-telegram.gtpack");
+        let file = File::create(&path).expect("create test pack file");
+        let mut zip = ZipWriter::new(file);
+        let options = FileOptions::<()>::default();
+        zip.start_file("assets/secret-requirements.json", options)
+            .expect("add secret requirements asset");
+        zip.write_all(br#"[{"key":"telegram_bot_token","required":true}]"#)
+            .expect("write secret requirements");
+        zip.finish().expect("finish test pack");
+        PackFixture { _dir: dir, path }
     }
 
     #[test]
