@@ -58,24 +58,31 @@ if [[ "$TARGET" == *windows* ]]; then
   BIN_NAME="${BIN_NAME}.exe"
 fi
 
-ARCHIVE_PREFIX="greentic-operator"
-if [[ -n "$VERSION" ]]; then
-  ARCHIVE_PREFIX="greentic-operator-v${VERSION}"
+if [[ -z "$VERSION" ]]; then
+  echo "--version is required for binstall packaging" >&2
+  exit 1
 fi
+ARCHIVE_PREFIX="greentic-operator-${TARGET}-v${VERSION}"
+STAGING_DIR="$(mktemp -d)"
+STAGING_ROOT="$STAGING_DIR/$ARCHIVE_PREFIX"
+mkdir -p "$STAGING_ROOT"
+cp "$BIN_DIR/$BIN_NAME" "$STAGING_ROOT/$BIN_NAME"
 
 if [[ "$TARGET" == *windows* ]]; then
-  ARCHIVE="$OUT_DIR/${ARCHIVE_PREFIX}-${TARGET}.zip"
+  ARCHIVE="$OUT_DIR/${ARCHIVE_PREFIX}.zip"
   if command -v 7z >/dev/null 2>&1; then
-    7z a -tzip "$ARCHIVE" "$BIN_DIR/$BIN_NAME" >/dev/null
+    7z a -tzip "$ARCHIVE" "$STAGING_ROOT/$BIN_NAME" >/dev/null
   else
     echo "7z is required to package Windows artifacts." >&2
     exit 1
   fi
 else
-  ARCHIVE="$OUT_DIR/${ARCHIVE_PREFIX}-${TARGET}.tar.gz"
-  tar -C "$BIN_DIR" -czf "$ARCHIVE" "$BIN_NAME"
+  ARCHIVE="$OUT_DIR/${ARCHIVE_PREFIX}.tgz"
+  tar -C "$STAGING_DIR" -czf "$ARCHIVE" "$ARCHIVE_PREFIX"
 fi
 
 popd >/dev/null
+
+rm -rf "$STAGING_DIR"
 
 echo "$ARCHIVE"
