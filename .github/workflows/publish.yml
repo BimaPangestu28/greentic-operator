@@ -39,7 +39,7 @@ jobs:
           if ref_name.startswith("v") and ref_name != f"v{version}":
               print(f"Tag/version mismatch: tag={ref_name} Cargo.toml={version}", file=sys.stderr)
               sys.exit(1)
-          tag = ref_name if ref_name.startswith("v") else f"v{version}"
+          tag = f"v{version}"
           print(f"version={version}")
           print(f"tag={tag}")
           with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as f:
