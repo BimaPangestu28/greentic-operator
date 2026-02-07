@@ -77,16 +77,7 @@ fn fake_bin(name: &str) -> PathBuf {
     if name == "greentic-operator" {
         return PathBuf::from(env!("CARGO_BIN_EXE_greentic-operator"));
     }
-    if let Ok(value) = std::env::var(format!("CARGO_BIN_EXE_{name}")) {
-        return PathBuf::from(value);
-    }
-    let mut path = std::env::current_exe().unwrap();
-    path.pop();
-    if path.file_name().and_then(|name| name.to_str()) == Some("deps") {
-        path.pop();
-    }
-    path.push(binary_name(name));
-    path
+    example_bin(name)
 }
 
 fn binary_name(name: &str) -> String {
@@ -95,4 +86,22 @@ fn binary_name(name: &str) -> String {
     } else {
         name.to_string()
     }
+}
+
+fn example_bin(name: &str) -> PathBuf {
+    let mut path = std::env::current_exe().unwrap();
+    path.pop();
+    if path.file_name().and_then(|name| name.to_str()) == Some("deps") {
+        path.pop();
+    }
+    let candidate = path.join("examples").join(binary_name(name));
+    if candidate.exists() {
+        return candidate;
+    }
+    let status = Command::new("cargo")
+        .args(["build", "--example", name])
+        .status()
+        .expect("failed to build example binary");
+    assert!(status.success(), "failed to build example binary");
+    candidate
 }

@@ -1,6 +1,6 @@
 [package]
 name = "greentic-operator"
-version = "0.4.21"
+version = "0.4.22"
 edition = "2024"
 rust-version = "1.90"
 description = "Greentic operator CLI for local dev and demo orchestration."
@@ -8,6 +8,7 @@ license = "MIT"
 repository = "https://github.com/greentic-ai/greentic-operator"
 homepage = "https://github.com/greentic-ai/greentic-operator"
 readme = "README.md"
+autobins = false
 
 [package.metadata.binstall]
 pkg-url = "{ repo }/releases/download/v{ version }/{ name }-{ target }-v{ version }.{ archive-format }"
@@ -17,6 +18,10 @@ bin = ["greentic-operator"]
 
 [package.metadata.binstall.overrides.x86_64-pc-windows-msvc]
 pkg-fmt = "zip"
+
+[[bin]]
+name = "greentic-operator"
+path = "src/main.rs"
 
 [dependencies]
 anyhow = "1.0"

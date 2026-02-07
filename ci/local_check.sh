@@ -62,8 +62,15 @@ fi
 
 PACKAGE_OUT="$(mktemp -d)"
 HOST_TARGET="$(rustc -vV | rg "^host:" | awk '{print $2}')"
-echo "[local_check] package binstall artifact for $HOST_TARGET"
-"$ROOT_DIR/ci/package_binstall.sh" --target "$HOST_TARGET" --out "$PACKAGE_OUT"
+VERSION="$(python - <<'PY'
+import tomllib
+with open("Cargo.toml", "rb") as f:
+    data = tomllib.load(f)
+print(data["package"]["version"])
+PY
+)"
+echo "[local_check] package binstall artifact for $HOST_TARGET (version=$VERSION)"
+"$ROOT_DIR/ci/package_binstall.sh" --target "$HOST_TARGET" --out "$PACKAGE_OUT" --version "$VERSION"
 
 if ! ls "$PACKAGE_OUT"/greentic-operator-"$HOST_TARGET"* >/dev/null 2>&1; then
   echo "Package artifact not created." >&2

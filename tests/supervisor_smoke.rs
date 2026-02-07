@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
 use std::path::PathBuf;
+use std::process::Command;
 
 use greentic_operator::runtime_state::RuntimePaths;
 use greentic_operator::supervisor::{
@@ -12,7 +13,7 @@ fn supervisor_spawns_and_stops_service() {
     let state_dir = temp.path().join("state");
     let paths = RuntimePaths::new(&state_dir, "demo", "default");
 
-    let bin = PathBuf::from(env!("CARGO_BIN_EXE_fake_service"));
+    let bin = fake_bin("fake_service");
     let spec = ServiceSpec {
         id: ServiceId::new("fake").unwrap(),
         argv: vec![bin.display().to_string(), "2".to_string()],
@@ -45,4 +46,37 @@ fn supervisor_spawns_and_stops_service() {
     stop_service(&paths, &ServiceId::new("fake").unwrap(), 500).unwrap();
     let statuses = read_status(&paths).unwrap();
     assert!(statuses.is_empty());
+}
+
+fn fake_bin(name: &str) -> PathBuf {
+    if name == "greentic-operator" {
+        return PathBuf::from(env!("CARGO_BIN_EXE_greentic-operator"));
+    }
+    example_bin(name)
+}
+
+fn binary_name(name: &str) -> String {
+    if cfg!(windows) {
+        format!("{name}.exe")
+    } else {
+        name.to_string()
+    }
+}
+
+fn example_bin(name: &str) -> PathBuf {
+    let mut path = std::env::current_exe().unwrap();
+    path.pop();
+    if path.file_name().and_then(|name| name.to_str()) == Some("deps") {
+        path.pop();
+    }
+    let candidate = path.join("examples").join(binary_name(name));
+    if candidate.exists() {
+        return candidate;
+    }
+    let status = Command::new("cargo")
+        .args(["build", "--example", name])
+        .status()
+        .expect("failed to build example binary");
+    assert!(status.success(), "failed to build example binary");
+    candidate
 }
