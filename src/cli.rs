@@ -2116,6 +2116,7 @@ impl DemoUpArgs {
         let debug_enabled = self.verbose;
         if let Some(bundle) = self.bundle.clone() {
             let state_dir = bundle.join("state");
+            std::fs::create_dir_all(&state_dir)?;
             let log_dir = self.log_dir.clone().unwrap_or_else(|| bundle.join("logs"));
             let log_dir = operator_log::init(log_dir.clone(), log_level)?;
             let run_targets =

@@ -46,6 +46,13 @@ fn demo_up_starts_events_services_when_events_packs_exist() {
     );
     std::fs::write(root.join("greentic.yaml"), config).unwrap();
 
+    let log_path = root.join("demo_start.log");
+    let log_file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_path)
+        .unwrap();
+    let log_file_err = log_file.try_clone().unwrap();
     let mut child = Command::new(fake_bin("greentic-operator"))
         .args([
             "demo",
@@ -58,18 +65,40 @@ fn demo_up_starts_events_services_when_events_packs_exist() {
             "--cloudflared",
             "off",
         ])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
+        .stdout(Stdio::from(log_file))
+        .stderr(Stdio::from(log_file_err))
         .spawn()
         .unwrap();
 
-    thread::sleep(Duration::from_secs(3));
+    let mut state_ready = false;
+    for _ in 0..50 {
+        if root.join("state").exists() {
+            state_ready = true;
+            break;
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
     let _ = child.kill();
+    let mut exited = false;
+    for _ in 0..20 {
+        if let Ok(Some(_)) = child.try_wait() {
+            exited = true;
+            break;
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+    if !exited {
+        let _ = child.kill();
+    }
     let _ = child.wait();
-    assert!(root.join("state").exists());
+    let logs = std::fs::read_to_string(&log_path).unwrap_or_default();
+    assert!(state_ready, "state dir missing. logs:\n{logs}");
 }
 
 fn fake_bin(name: &str) -> PathBuf {
+    if name == "greentic-operator" {
+        return PathBuf::from(env!("CARGO_BIN_EXE_greentic-operator"));
+    }
     if let Ok(value) = std::env::var(format!("CARGO_BIN_EXE_{name}")) {
         return PathBuf::from(value);
     }

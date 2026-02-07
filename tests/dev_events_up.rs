@@ -74,6 +74,9 @@ fn dev_up_starts_events_only_when_events_packs_present() {
 }
 
 fn fake_bin(name: &str) -> PathBuf {
+    if name == "greentic-operator" {
+        return PathBuf::from(env!("CARGO_BIN_EXE_greentic-operator"));
+    }
     if let Ok(value) = std::env::var(format!("CARGO_BIN_EXE_{name}")) {
         return PathBuf::from(value);
     }

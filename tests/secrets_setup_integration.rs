@@ -20,6 +20,9 @@ use greentic_operator::{
 use greentic_secrets_lib::{SecretsStore, core::seed::DevStore};
 
 fn fake_bin(name: &str) -> PathBuf {
+    if name == "greentic-operator" {
+        return PathBuf::from(env!("CARGO_BIN_EXE_greentic-operator"));
+    }
     if let Ok(value) = std::env::var(format!("CARGO_BIN_EXE_{name}")) {
         return PathBuf::from(value);
     }

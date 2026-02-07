@@ -396,6 +396,7 @@ pub fn demo_up(
 ) -> anyhow::Result<()> {
     let team_id = team.unwrap_or("default");
     let state_dir = bundle_root.join("state");
+    std::fs::create_dir_all(&state_dir)?;
     let paths = RuntimePaths::new(&state_dir, tenant, team_id);
     let mut service_tracker = ServiceTracker::new(&paths, Some(log_dir))?;
     let mut service_summaries = Vec::new();
