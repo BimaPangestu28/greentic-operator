@@ -12,7 +12,12 @@ cargo fmt --check
 cargo clippy
 cargo test
 
-if rg -n "path\\s*=" -g "Cargo.toml" "$ROOT_DIR" >/dev/null; then
+if command -v rg >/dev/null 2>&1; then
+  HAS_PATH_DEPS="$(rg -n "path\\s*=" -g "Cargo.toml" "$ROOT_DIR" || true)"
+else
+  HAS_PATH_DEPS="$(grep -R -n --include "Cargo.toml" -E "path\\s*=" "$ROOT_DIR" || true)"
+fi
+if [[ -n "$HAS_PATH_DEPS" ]]; then
   echo "path dependencies present; skipping publish dry-run"
   PUBLISH_WORKSPACE=""
 else

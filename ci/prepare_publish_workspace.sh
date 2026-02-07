@@ -37,9 +37,14 @@ while IFS= read -r -d '' file; do
   strip_path_deps "$file"
 done < <(find "$WORK_DIR" -name "Cargo.toml" -print0)
 
-if rg -n "path\\s*=" -g "Cargo.toml" "$WORK_DIR" >/dev/null; then
+if command -v rg >/dev/null 2>&1; then
+  PATH_DEP_LINES="$(rg -n "path\\s*=" -g "Cargo.toml" "$WORK_DIR" || true)"
+else
+  PATH_DEP_LINES="$(grep -R -n --include "Cargo.toml" -E "path\\s*=" "$WORK_DIR" || true)"
+fi
+if [[ -n "$PATH_DEP_LINES" ]]; then
   echo "path dependencies remain in publish workspace." >&2
-  rg -n "path\\s*=" -g "Cargo.toml" "$WORK_DIR" >&2
+  echo "$PATH_DEP_LINES" >&2
   PATH_DEPS=1
   touch "$WORK_DIR/.path-deps"
 fi
