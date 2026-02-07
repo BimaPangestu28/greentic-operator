@@ -6,7 +6,7 @@ use serde_json::Value;
 
 use crate::runtime_state;
 
-pub use messaging_universal_dto::AuthUserRefV1;
+pub use greentic_types::messaging::universal_dto::AuthUserRefV1;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SubscriptionState {

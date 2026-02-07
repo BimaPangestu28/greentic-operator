@@ -15,7 +15,7 @@ use greentic_operator::subscriptions_universal::{
     service::{ProviderRunner, SubscriptionEnsureRequest, SubscriptionService},
     store::{AuthUserRefV1, SubscriptionState, SubscriptionStore},
 };
-use messaging_universal_dto::{
+use greentic_types::messaging::universal_dto::{
     SubscriptionDeleteInV1, SubscriptionEnsureInV1, SubscriptionRenewInV1,
 };
 

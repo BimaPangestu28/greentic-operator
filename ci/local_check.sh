@@ -12,10 +12,11 @@ cargo fmt --check
 cargo clippy
 cargo test
 
-PUBLISH_WORKSPACE="$("$ROOT_DIR/ci/prepare_publish_workspace.sh" --dry-run)"
-if [[ -f "$PUBLISH_WORKSPACE/.path-deps" ]]; then
-  echo "path dependencies remain in publish workspace; skipping publish dry-run"
+if rg -n "path\\s*=" -g "Cargo.toml" "$ROOT_DIR" >/dev/null; then
+  echo "path dependencies present; skipping publish dry-run"
+  PUBLISH_WORKSPACE=""
 else
+  PUBLISH_WORKSPACE="$("$ROOT_DIR/ci/prepare_publish_workspace.sh" --dry-run)"
   pushd "$PUBLISH_WORKSPACE" >/dev/null
   cargo publish --dry-run -p greentic-operator
   popd >/dev/null
@@ -32,4 +33,7 @@ fi
 
 popd >/dev/null
 
-rm -rf "$PUBLISH_WORKSPACE" "$PACKAGE_OUT"
+rm -rf "$PACKAGE_OUT"
+if [[ -n "${PUBLISH_WORKSPACE:-}" ]]; then
+  rm -rf "$PUBLISH_WORKSPACE"
+fi

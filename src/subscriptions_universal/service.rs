@@ -1,5 +1,5 @@
 use anyhow::{Result, anyhow};
-use messaging_universal_dto::{
+use greentic_types::messaging::universal_dto::{
     AuthUserRefV1, SubscriptionDeleteInV1, SubscriptionEnsureInV1, SubscriptionRenewInV1,
 };
 use serde_json::to_vec;

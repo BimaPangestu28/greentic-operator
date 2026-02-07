@@ -1,6 +1,6 @@
 [package]
 name = "greentic-operator"
-version = "0.4.14"
+version = "0.4.15"
 edition = "2024"
 rust-version = "1.90"
 description = "Greentic operator CLI for local dev and demo orchestration."
@@ -28,10 +28,9 @@ tokio = { version = "1", features = ["rt-multi-thread", "sync", "signal", "net"]
 hyper = { version = "1", features = ["full"] }
 http-body-util = "0.1"
 hyper-util = "0.1"
-messaging-universal-dto = { path = "../greentic-messaging-providers/crates/messaging-universal-dto" }
+greentic-types = { path = "../greentic-types", features = ["serde"] }
 rpassword = "7"
 greentic-secrets-lib = { version = "0.4", features = ["providers-dev"] }
-greentic-types = { version = "0.4", features = ["serde"] }
 uuid = { version = "1", features = ["v4"] }
 rand = "0.9"
 async-trait = "0.1"
