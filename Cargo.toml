@@ -1,6 +1,6 @@
 [package]
 name = "greentic-operator"
-version = "0.4.19"
+version = "0.4.20"
 edition = "2024"
 rust-version = "1.90"
 description = "Greentic operator CLI for local dev and demo orchestration."
@@ -13,6 +13,7 @@ readme = "README.md"
 pkg-url = "{ repo }/releases/download/v{ version }/{ name }-{ target }-v{ version }.{ archive-format }"
 bin-dir = "{ name }-{ target }-v{ version }/{ bin }{ binary-ext }"
 pkg-fmt = "tgz"
+bin = ["greentic-operator"]
 
 [package.metadata.binstall.overrides.x86_64-pc-windows-msvc]
 pkg-fmt = "zip"
