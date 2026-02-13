@@ -53,6 +53,46 @@ fn demo_setup_runs_all_domains() {
         .join("providers");
     assert!(providers_root.join("msg-a.setup.json").exists());
     assert!(providers_root.join("evt-b.setup.json").exists());
+    assert!(
+        providers_root
+            .join("msg-a")
+            .join("config.envelope.cbor")
+            .exists()
+    );
+    assert!(
+        providers_root
+            .join("msg-a")
+            .join("answers")
+            .join("setup.answers.json")
+            .exists()
+    );
+    assert!(
+        providers_root
+            .join("msg-a")
+            .join("answers")
+            .join("setup.answers.cbor")
+            .exists()
+    );
+    assert!(
+        providers_root
+            .join("evt-b")
+            .join("config.envelope.cbor")
+            .exists()
+    );
+    assert!(
+        providers_root
+            .join("evt-b")
+            .join("answers")
+            .join("setup.answers.json")
+            .exists()
+    );
+    assert!(
+        providers_root
+            .join("evt-b")
+            .join("answers")
+            .join("setup.answers.cbor")
+            .exists()
+    );
 }
 
 #[test]
@@ -94,6 +134,32 @@ fn demo_setup_best_effort_skips_missing_setup() {
         .join("providers");
     assert!(providers_root.join("msg-good.setup.json").exists());
     assert!(!providers_root.join("msg-bad.setup.json").exists());
+    assert!(
+        providers_root
+            .join("msg-good")
+            .join("config.envelope.cbor")
+            .exists()
+    );
+    assert!(
+        providers_root
+            .join("msg-good")
+            .join("answers")
+            .join("setup.answers.json")
+            .exists()
+    );
+    assert!(
+        providers_root
+            .join("msg-good")
+            .join("answers")
+            .join("setup.answers.cbor")
+            .exists()
+    );
+    assert!(
+        !providers_root
+            .join("msg-bad")
+            .join("config.envelope.cbor")
+            .exists()
+    );
 }
 
 fn fake_bin(name: &str) -> PathBuf {

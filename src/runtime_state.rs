@@ -104,16 +104,22 @@ pub fn read_json<T: DeserializeOwned>(path: &Path) -> anyhow::Result<Option<T>> 
 }
 
 pub fn atomic_write(path: &Path, bytes: &[u8]) -> anyhow::Result<()> {
+    use std::io::Write;
+
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
     let mut tmp = path.to_path_buf();
     tmp.set_extension("tmp");
-    std::fs::write(&tmp, bytes)?;
-    if path.exists() {
-        let _ = std::fs::remove_file(path);
-    }
+    let mut file = std::fs::File::create(&tmp)?;
+    file.write_all(bytes)?;
+    file.sync_all()?;
     std::fs::rename(&tmp, path)?;
+    if let Some(parent) = path.parent()
+        && let Ok(dir) = std::fs::File::open(parent)
+    {
+        let _ = dir.sync_all();
+    }
     Ok(())
 }
 

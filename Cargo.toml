@@ -1,6 +1,6 @@
 [package]
 name = "greentic-operator"
-version = "0.4.22"
+version = "0.4.23"
 edition = "2024"
 rust-version = "1.90"
 description = "Greentic operator CLI for local dev and demo orchestration."
@@ -52,6 +52,7 @@ rand = "0.9"
 async-trait = "0.1"
 tracing = "0.1"
 tracing-subscriber = "0.3"
+jsonschema = "0.41"
 
 [dev-dependencies]
 tempfile = "3.10"

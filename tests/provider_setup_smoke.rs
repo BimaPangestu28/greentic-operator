@@ -34,6 +34,8 @@ fn provider_setup_writes_outputs() {
         force_setup: true,
         skip_setup: false,
         skip_secrets_init: true,
+        allow_contract_change: false,
+        backup: false,
         setup_input: None,
         runner_binary: Some(fake_bin("fake_runner")),
         continue_on_error: true,
@@ -56,6 +58,26 @@ fn provider_setup_writes_outputs() {
     assert!(providers_root.join("msgraph.setup.json").exists());
     assert!(providers_root.join("msgraph.verify.json").exists());
     assert!(providers_root.join("msgraph.status.json").exists());
+    assert!(
+        providers_root
+            .join("msgraph")
+            .join("config.envelope.cbor")
+            .exists()
+    );
+    assert!(
+        providers_root
+            .join("msgraph")
+            .join("answers")
+            .join("setup.answers.json")
+            .exists()
+    );
+    assert!(
+        providers_root
+            .join("msgraph")
+            .join("answers")
+            .join("setup.answers.cbor")
+            .exists()
+    );
 }
 
 fn fake_bin(name: &str) -> PathBuf {

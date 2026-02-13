@@ -381,7 +381,7 @@ struct DevLogsArgs {
 #[command(
     about = "Run provider setup flows for a domain.",
     long_about = "Executes setup_default across providers and can auto-run secrets init for messaging.",
-    after_help = "Main options:\n  <DOMAIN>\n  --tenant <TENANT>\n\nOptional options:\n  --team <TEAM>\n  --provider <FILTER>\n  --dry-run\n  --format <text|json|yaml> (default: text)\n  --parallel <N> (default: 1)\n  --allow-missing-setup\n  --online\n  --secrets-env <ENV>\n  --project-root <PATH> (default: current directory)"
+    after_help = "Main options:\n  <DOMAIN>\n  --tenant <TENANT>\n\nOptional options:\n  --team <TEAM>\n  --provider <FILTER>\n  --dry-run\n  --format <text|json|yaml> (default: text)\n  --parallel <N> (default: 1)\n  --allow-missing-setup\n  --allow-contract-change\n  --backup\n  --online\n  --secrets-env <ENV>\n  --project-root <PATH> (default: current directory)"
 )]
 struct DomainSetupArgs {
     domain: DomainArg,
@@ -399,6 +399,10 @@ struct DomainSetupArgs {
     parallel: usize,
     #[arg(long)]
     allow_missing_setup: bool,
+    #[arg(long)]
+    allow_contract_change: bool,
+    #[arg(long)]
+    backup: bool,
     #[arg(long)]
     online: bool,
     #[arg(long)]
@@ -683,6 +687,18 @@ struct DemoUpArgs {
     #[arg(
         long,
         help_heading = "Optional options",
+        help = "Allow stored-vs-resolved contract hash changes when writing provider config."
+    )]
+    allow_contract_change: bool,
+    #[arg(
+        long,
+        help_heading = "Optional options",
+        help = "Write a single .bak backup before replacing provider config envelopes."
+    )]
+    backup: bool,
+    #[arg(
+        long,
+        help_heading = "Optional options",
         help = "Path to a greentic-runner binary override."
     )]
     runner_binary: Option<PathBuf>,
@@ -766,7 +782,7 @@ impl From<NatsModeArg> for demo::NatsMode {
 #[command(
     about = "Run provider setup flows against a demo bundle.",
     long_about = "Executes setup flows for provider packs included in the bundle.",
-    after_help = "Main options:\n  --bundle <DIR>\n  --tenant <TENANT>\n\nOptional options:\n  --team <TEAM>\n  --domain <messaging|events|secrets|all> (default: all)\n  --provider <FILTER>\n  --dry-run\n  --format <text|json|yaml> (default: text)\n  --parallel <N> (default: 1)\n  --allow-missing-setup\n  --online\n  --secrets-env <ENV>\n  --skip-secrets-init\n  --setup-input <PATH>\n  --runner-binary <PATH>\n  --best-effort"
+    after_help = "Main options:\n  --bundle <DIR>\n  --tenant <TENANT>\n\nOptional options:\n  --team <TEAM>\n  --domain <messaging|events|secrets|all> (default: all)\n  --provider <FILTER>\n  --dry-run\n  --format <text|json|yaml> (default: text)\n  --parallel <N> (default: 1)\n  --allow-missing-setup\n  --allow-contract-change\n  --backup\n  --online\n  --secrets-env <ENV>\n  --skip-secrets-init\n  --setup-input <PATH>\n  --runner-binary <PATH>\n  --best-effort"
 )]
 struct DemoSetupArgs {
     #[arg(long)]
@@ -787,6 +803,10 @@ struct DemoSetupArgs {
     parallel: usize,
     #[arg(long)]
     allow_missing_setup: bool,
+    #[arg(long)]
+    allow_contract_change: bool,
+    #[arg(long)]
+    backup: bool,
     #[arg(long)]
     online: bool,
     #[arg(long)]
@@ -1120,6 +1140,7 @@ impl DemoRunArgs {
             .map(|bundle| bundle.join("packs"))
             .unwrap_or(self.packs_dir);
         let pack = pack_resolve::resolve_pack(&packs_dir, &self.pack)?;
+        let pack_path = ensure_pack_within_root(&packs_dir, &pack.pack_path)?;
         let flow_id = pack.select_flow(self.flow.as_deref())?;
         let parsed_input = match self.input {
             Some(value) => Some(demo_input::parse_input(&value)?),
@@ -1138,7 +1159,7 @@ impl DemoRunArgs {
             },
         };
         println!("Run summary:");
-        println!("  pack: {} ({})", pack.pack_id, pack.pack_path.display());
+        println!("  pack: {} ({})", pack.pack_id, pack_path.display());
         println!("  tenant: {} team: {}", self.tenant, team_display);
         println!("  flow: {}", flow_id);
         println!("  input: {}", input_desc);
@@ -1155,7 +1176,7 @@ impl DemoRunArgs {
             default_manager()?
         };
         let runner = DemoRunner::with_entry_flow(
-            pack.pack_path.clone(),
+            pack_path,
             &self.tenant,
             self.team.clone(),
             flow_id.clone(),
@@ -1168,6 +1189,22 @@ impl DemoRunArgs {
         repl.run()?;
         Ok(())
     }
+}
+
+fn ensure_pack_within_root(root: &Path, pack_path: &Path) -> anyhow::Result<PathBuf> {
+    let root = std::fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
+    let resolved = std::fs::canonicalize(pack_path).unwrap_or_else(|_| pack_path.to_path_buf());
+    if resolved.starts_with(&root) {
+        return Ok(pack_path.to_path_buf());
+    }
+    let file_name = pack_path
+        .file_name()
+        .ok_or_else(|| anyhow::anyhow!("pack path missing file name"))?;
+    let cache_dir = root.join(".resolved");
+    std::fs::create_dir_all(&cache_dir)?;
+    let dest = cache_dir.join(file_name);
+    std::fs::copy(&resolved, &dest)?;
+    Ok(dest)
 }
 
 impl DemoListPacksArgs {
@@ -1941,6 +1978,8 @@ impl DomainSetupArgs {
             format: self.format,
             parallel: self.parallel,
             allow_missing_setup: self.allow_missing_setup,
+            allow_contract_change: self.allow_contract_change,
+            backup: self.backup,
             online: self.online,
             secrets_env: self.secrets_env,
             runner_binary: None,
@@ -1970,6 +2009,8 @@ impl DomainDiagnosticsArgs {
             format: self.format,
             parallel: self.parallel,
             allow_missing_setup: true,
+            allow_contract_change: false,
+            backup: false,
             online: self.online,
             secrets_env: None,
             runner_binary: None,
@@ -1999,6 +2040,8 @@ impl DomainVerifyArgs {
             format: self.format,
             parallel: self.parallel,
             allow_missing_setup: true,
+            allow_contract_change: false,
+            backup: false,
             online: self.online,
             secrets_env: None,
             runner_binary: None,
@@ -2448,6 +2491,8 @@ impl DemoUpArgs {
             force_setup: self.force_setup,
             skip_setup: self.skip_setup,
             skip_secrets_init: self.skip_secrets_init,
+            allow_contract_change: self.allow_contract_change,
+            backup: self.backup,
             setup_input: provider_setup_input.clone(),
             runner_binary: self.runner_binary,
             continue_on_error: provider_setup_input.is_none(),
@@ -2644,6 +2689,8 @@ impl DemoSetupArgs {
                 format,
                 parallel: self.parallel,
                 allow_missing_setup: self.allow_missing_setup,
+                allow_contract_change: self.allow_contract_change,
+                backup: self.backup,
                 online: self.online,
                 secrets_env: if self.skip_secrets_init {
                     None
@@ -2666,10 +2713,25 @@ impl DemoSetupArgs {
 
 impl DemoPolicyArgs {
     fn run(self, policy: Policy) -> anyhow::Result<()> {
-        let gmap_path = demo_bundle_gmap_path(&self.bundle, &self.tenant, self.team.as_deref());
+        let effective_team = if let Some(team) = self.team.clone() {
+            Some(team)
+        } else if self
+            .bundle
+            .join("tenants")
+            .join(&self.tenant)
+            .join("teams")
+            .join("default")
+            .exists()
+        {
+            Some("default".to_string())
+        } else {
+            None
+        };
+        let gmap_path =
+            demo_bundle_gmap_path(&self.bundle, &self.tenant, effective_team.as_deref());
         gmap::upsert_policy(&gmap_path, &self.path, policy)?;
         project::sync_project(&self.bundle)?;
-        copy_resolved_manifest(&self.bundle, &self.tenant, self.team.as_deref())?;
+        copy_resolved_manifest(&self.bundle, &self.tenant, effective_team.as_deref())?;
         Ok(())
     }
 }
@@ -4197,6 +4259,8 @@ fn run_demo_up_setup(
                 format: PlanFormat::Text,
                 parallel: 1,
                 allow_missing_setup: true,
+                allow_contract_change: false,
+                backup: false,
                 online: false,
                 secrets_env: Some(env.to_string()),
                 runner_binary: runner_binary.clone(),
@@ -4455,6 +4519,8 @@ struct DomainRunArgs {
     format: PlanFormat,
     parallel: usize,
     allow_missing_setup: bool,
+    allow_contract_change: bool,
+    backup: bool,
     online: bool,
     secrets_env: Option<String>,
     runner_binary: Option<PathBuf>,
@@ -4619,6 +4685,8 @@ fn run_domain_command(args: DomainRunArgs) -> anyhow::Result<()> {
         plan,
         args.parallel,
         dist_offline,
+        args.allow_contract_change,
+        args.backup,
         args.secrets_env.as_deref(),
         runner_binary,
         args.best_effort,
@@ -4661,6 +4729,8 @@ fn run_plan(
     plan: Vec<domains::PlannedRun>,
     parallel: usize,
     dist_offline: bool,
+    allow_contract_change: bool,
+    backup: bool,
     secrets_env: Option<&str>,
     runner_binary: Option<PathBuf>,
     best_effort: bool,
@@ -4685,6 +4755,8 @@ fn run_plan(
                 team,
                 &item,
                 dist_offline,
+                allow_contract_change,
+                backup,
                 secrets_env,
                 runner_binary.as_deref(),
                 setup_answers.as_deref(),
@@ -4744,6 +4816,8 @@ fn run_plan(
                     team.as_deref(),
                     &item,
                     dist_offline,
+                    allow_contract_change,
+                    backup,
                     secrets_env.as_deref(),
                     runner_binary.as_deref(),
                     setup_answers.as_deref(),
@@ -4798,7 +4872,7 @@ fn render_plan(plan: &[domains::PlannedRun], format: PlanFormat) -> anyhow::Resu
 
 #[allow(clippy::too_many_arguments)]
 fn run_plan_item(
-    _root: &Path,
+    root: &Path,
     state_root: &Path,
     domain: Domain,
     action: DomainAction,
@@ -4806,6 +4880,8 @@ fn run_plan_item(
     team: Option<&str>,
     item: &domains::PlannedRun,
     dist_offline: bool,
+    allow_contract_change: bool,
+    backup: bool,
     secrets_env: Option<&str>,
     runner_binary: Option<&Path>,
     setup_answers: Option<&SetupInputAnswers>,
@@ -4869,9 +4945,85 @@ fn run_plan_item(
     } else {
         None
     };
+    let providers_root = state_root
+        .join("state")
+        .join("runtime")
+        .join(tenant)
+        .join("providers");
+    if let Err(err) = crate::provider_config_envelope::ensure_contract_compatible(
+        &providers_root,
+        &provider_id,
+        &item.flow_id,
+        &item.pack.path,
+        allow_contract_change,
+    ) {
+        operator_log::error(module_path!(), err.to_string());
+        return Err(err);
+    }
+    let current_config = crate::provider_config_envelope::read_provider_config_envelope(
+        &providers_root,
+        &provider_id,
+    )?
+    .map(|envelope| envelope.config);
+    let qa_mode = if action == DomainAction::Setup {
+        Some(crate::component_qa_ops::QaMode::Setup)
+    } else {
+        crate::component_qa_ops::qa_mode_for_flow(&item.flow_id)
+    };
+    let qa_answers = if action == DomainAction::Setup {
+        setup_values.clone().unwrap_or_else(|| json!({}))
+    } else {
+        json!({})
+    };
+    let qa_config_override = if let Some(mode) = qa_mode {
+        if let Err(err) = crate::component_qa_ops::persist_answers_artifacts(
+            &providers_root,
+            &provider_id,
+            mode,
+            &qa_answers,
+        ) {
+            operator_log::warn(
+                module_path!(),
+                format!(
+                    "failed to persist qa answers provider={} mode={} flow={}: {err}",
+                    provider_id,
+                    mode.as_str(),
+                    item.flow_id
+                ),
+            );
+        }
+        match crate::component_qa_ops::apply_answers_via_component_qa(
+            root,
+            domain,
+            tenant,
+            team,
+            &item.pack,
+            &provider_id,
+            mode,
+            current_config.as_ref(),
+            &qa_answers,
+        ) {
+            Ok(value) => value,
+            Err(diag) => {
+                operator_log::error(
+                    module_path!(),
+                    format!(
+                        "component qa failed provider={} flow={} code={} message={}",
+                        provider_id,
+                        item.flow_id,
+                        diag.code.as_str(),
+                        diag.message
+                    ),
+                );
+                return Err(anyhow::anyhow!("{diag}"));
+            }
+        }
+    } else {
+        None
+    };
 
     let public_base_url_ref = public_base_url.as_deref().map(|value| value.as_str());
-    let input = build_input_payload(
+    let mut input = build_input_payload(
         state_root,
         domain,
         tenant,
@@ -4881,6 +5033,9 @@ fn run_plan_item(
         public_base_url_ref,
         &env_value,
     );
+    if let Some(config) = qa_config_override.as_ref() {
+        input["config"] = config.clone();
+    }
     if demo_debug_enabled() {
         println!(
             "[demo] setup input pack={} flow={} input={}",
@@ -4912,13 +5067,29 @@ fn run_plan_item(
         )?;
         write_runner_cli_artifacts(&run_dir, &output)?;
         if action == DomainAction::Setup {
-            let providers_root = state_root
-                .join("state")
-                .join("runtime")
-                .join(tenant)
-                .join("providers");
             let setup_path = providers_root.join(format!("{provider_id}.setup.json"));
             crate::providers::write_run_output(&setup_path, &provider_id, &item.flow_id, &output)?;
+            if let Some(config_value) = qa_config_override
+                .clone()
+                .or_else(|| extract_config_for_envelope(output.parsed.as_ref()))
+            {
+                if let Err(err) = crate::provider_config_envelope::write_provider_config_envelope(
+                    &providers_root,
+                    &provider_id,
+                    &item.flow_id,
+                    &config_value,
+                    &item.pack.path,
+                    backup,
+                ) {
+                    operator_log::warn(
+                        module_path!(),
+                        format!(
+                            "failed to write provider config envelope provider={} flow={}: {err}",
+                            provider_id, item.flow_id
+                        ),
+                    );
+                }
+            }
         }
         let exit = format_runner_exit(&output);
         if output.status.success() {
@@ -4961,11 +5132,6 @@ fn run_plan_item(
             err
         })?;
         if action == DomainAction::Setup {
-            let providers_root = state_root
-                .join("state")
-                .join("runtime")
-                .join(tenant)
-                .join("providers");
             let setup_path = providers_root.join(format!("{provider_id}.setup.json"));
             crate::providers::write_run_result(
                 &setup_path,
@@ -4973,6 +5139,26 @@ fn run_plan_item(
                 &item.flow_id,
                 &output.result,
             )?;
+            if let Some(config_value) = qa_config_override.clone().or_else(|| {
+                extract_config_for_envelope(serde_json::to_value(&output.result).ok().as_ref())
+            }) {
+                if let Err(err) = crate::provider_config_envelope::write_provider_config_envelope(
+                    &providers_root,
+                    &provider_id,
+                    &item.flow_id,
+                    &config_value,
+                    &item.pack.path,
+                    backup,
+                ) {
+                    operator_log::warn(
+                        module_path!(),
+                        format!(
+                            "failed to write provider config envelope provider={} flow={}: {err}",
+                            provider_id, item.flow_id
+                        ),
+                    );
+                }
+            }
         }
         println!(
             "{} {} -> {:?}",
@@ -5065,6 +5251,14 @@ fn summarize_runner_error(output: &runner_integration::RunnerOutput) -> Option<S
         .map(|line| line.trim())
         .find(|line| !line.is_empty())
         .map(|line| line.to_string())
+}
+
+fn extract_config_for_envelope(parsed: Option<&JsonValue>) -> Option<JsonValue> {
+    let value = parsed?;
+    if let Some(config) = value.get("config") {
+        return Some(config.clone());
+    }
+    Some(value.clone())
 }
 
 fn build_domain_env(

@@ -1,7 +1,11 @@
+use std::collections::BTreeSet;
 use std::path::PathBuf;
-use std::process::{Command, Stdio};
-use std::thread;
-use std::time::Duration;
+use std::process::Command;
+
+use greentic_operator::config::load_demo_config;
+use greentic_operator::demo::demo_up_services;
+use greentic_operator::runtime_state::RuntimePaths;
+use greentic_operator::supervisor;
 
 fn write_pack(path: &std::path::Path, pack_id: &str) -> anyhow::Result<()> {
     let file = std::fs::File::create(path)?;
@@ -32,7 +36,32 @@ fn demo_up_starts_events_services_when_events_packs_exist() {
     .unwrap();
 
     let config = format!(
-        r#"services:
+        r#"tenant: demo
+team: default
+services:
+  messaging:
+    enabled: false
+  nats:
+    enabled: true
+    url: "nats://127.0.0.1:4222"
+    spawn:
+      enabled: true
+      binary: "{nats}"
+      args: []
+  gateway:
+    binary: "{gateway}"
+    listen_addr: "127.0.0.1"
+    port: 8081
+    args: []
+  egress:
+    binary: "{egress}"
+    args: []
+  subscriptions:
+    msgraph:
+      enabled: true
+      binary: "{subs}"
+      mode: "poll"
+      args: []
   events:
     enabled: auto
     components:
@@ -41,58 +70,47 @@ fn demo_up_starts_events_services_when_events_packs_exist() {
       - id: events-worker
         binary: "{worker}"
 "#,
+        nats = fake_bin("fake_nats_server").display(),
+        gateway = fake_bin("fake_gsm_gateway").display(),
+        egress = fake_bin("fake_gsm_egress").display(),
+        subs = fake_bin("fake_gsm_msgraph_subscriptions").display(),
         ingress = fake_bin("fake_events_ingress").display(),
         worker = fake_bin("fake_events_worker").display(),
     );
     std::fs::write(root.join("greentic.yaml"), config).unwrap();
+    let config_path = root.join("greentic.yaml");
+    let demo_config = load_demo_config(&config_path).unwrap();
+    let log_dir = root.join("logs");
 
-    let log_path = root.join("demo_start.log");
-    let log_file = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&log_path)
-        .unwrap();
-    let log_file_err = log_file.try_clone().unwrap();
-    let mut child = Command::new(fake_bin("greentic-operator"))
-        .args([
-            "demo",
-            "start",
-            "--bundle",
-            root.to_string_lossy().as_ref(),
-            "--tenant",
-            "demo",
-            "--no-nats",
-            "--cloudflared",
-            "off",
-        ])
-        .stdout(Stdio::from(log_file))
-        .stderr(Stdio::from(log_file_err))
-        .spawn()
-        .unwrap();
+    demo_up_services(
+        &config_path,
+        &demo_config,
+        None,
+        None,
+        &BTreeSet::new(),
+        greentic_operator::providers::ProviderSetupOptions {
+            providers: None,
+            verify_webhooks: false,
+            force_setup: false,
+            skip_setup: true,
+            skip_secrets_init: true,
+            allow_contract_change: false,
+            backup: false,
+            setup_input: None,
+            runner_binary: None,
+            continue_on_error: true,
+        },
+        &log_dir,
+        true,
+    )
+    .unwrap();
 
-    let mut state_ready = false;
-    for _ in 0..50 {
-        if root.join("state").exists() {
-            state_ready = true;
-            break;
-        }
-        thread::sleep(Duration::from_millis(100));
-    }
-    let _ = child.kill();
-    let mut exited = false;
-    for _ in 0..20 {
-        if let Ok(Some(_)) = child.try_wait() {
-            exited = true;
-            break;
-        }
-        thread::sleep(Duration::from_millis(100));
-    }
-    if !exited {
-        let _ = child.kill();
-    }
-    let _ = child.wait();
-    let logs = std::fs::read_to_string(&log_path).unwrap_or_default();
-    assert!(state_ready, "state dir missing. logs:\n{logs}");
+    assert!(root.join("state").exists(), "state dir missing");
+    let paths = RuntimePaths::new(root.join("state"), "demo", "default");
+    assert!(paths.pid_path("events-ingress").exists());
+    assert!(paths.pid_path("events-worker").exists());
+    let _ = supervisor::stop_pidfile(&paths.pid_path("events-ingress"), 1_000);
+    let _ = supervisor::stop_pidfile(&paths.pid_path("events-worker"), 1_000);
 }
 
 fn fake_bin(name: &str) -> PathBuf {

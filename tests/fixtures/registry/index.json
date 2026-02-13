@@ -1,0 +1,8 @@
+{
+  "components": [
+    {
+      "component_id": "messaging-telegram",
+      "path": "components/messaging-telegram"
+    }
+  ]
+}

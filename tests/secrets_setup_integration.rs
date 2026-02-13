@@ -118,6 +118,8 @@ fn provider_setup_seeds_and_resolves_secret() -> Result<()> {
         force_setup: true,
         skip_setup: false,
         skip_secrets_init: false,
+        allow_contract_change: false,
+        backup: false,
         setup_input: None,
         runner_binary: Some(fake_bin("fake_runner")),
         continue_on_error: false,

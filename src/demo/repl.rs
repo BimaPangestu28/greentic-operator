@@ -81,6 +81,7 @@ impl DemoRepl {
                     }
                 }
                 DemoBlockedOn::Finished(output) => {
+                    let output = humanize_output(&output);
                     println!("Flow finished with output:");
                     println!(
                         "{}",
@@ -211,4 +212,45 @@ impl DemoRepl {
             .collect::<Vec<_>>()
             .join(", ")
     }
+}
+
+fn humanize_output(value: &JsonValue) -> JsonValue {
+    match value {
+        JsonValue::Object(map) => {
+            let mut updated = serde_json::Map::new();
+            for (key, value) in map {
+                if key == "metadata" || key == "payload" {
+                    if let Some(bytes) = json_array_to_bytes(value) {
+                        if let Ok(text) = String::from_utf8(bytes) {
+                            if let Ok(parsed) = serde_json::from_str::<JsonValue>(&text) {
+                                updated.insert(key.clone(), parsed);
+                                continue;
+                            }
+                            updated.insert(key.clone(), JsonValue::String(text));
+                            continue;
+                        }
+                    }
+                }
+                updated.insert(key.clone(), humanize_output(value));
+            }
+            JsonValue::Object(updated)
+        }
+        JsonValue::Array(items) => JsonValue::Array(items.iter().map(humanize_output).collect()),
+        other => other.clone(),
+    }
+}
+
+fn json_array_to_bytes(value: &JsonValue) -> Option<Vec<u8>> {
+    let JsonValue::Array(items) = value else {
+        return None;
+    };
+    let mut bytes = Vec::with_capacity(items.len());
+    for item in items {
+        let value = item.as_u64()?;
+        if value > u8::MAX as u64 {
+            return None;
+        }
+        bytes.push(value as u8);
+    }
+    Some(bytes)
 }

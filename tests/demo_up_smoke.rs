@@ -58,6 +58,8 @@ services:
             force_setup: false,
             skip_setup: true,
             skip_secrets_init: true,
+            allow_contract_change: false,
+            backup: false,
             setup_input: None,
             runner_binary: None,
             continue_on_error: true,

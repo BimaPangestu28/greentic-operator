@@ -11,6 +11,7 @@ use serde_json::Value;
 use crate::bin_resolver::{self, ResolveCtx};
 use crate::config::{DemoConfig, DemoProviderConfig};
 use crate::dev_mode::DevSettingsResolved;
+use crate::domains::Domain;
 use crate::operator_log;
 use crate::runner_integration;
 use crate::runtime_state::RuntimePaths;
@@ -25,6 +26,8 @@ pub struct ProviderSetupOptions {
     pub force_setup: bool,
     pub skip_setup: bool,
     pub skip_secrets_init: bool,
+    pub allow_contract_change: bool,
+    pub backup: bool,
     pub setup_input: Option<PathBuf>,
     pub runner_binary: Option<PathBuf>,
     pub continue_on_error: bool,
@@ -107,6 +110,75 @@ pub fn run_provider_setup(
                 setup_input_answers.as_ref(),
                 setup_input_answers.is_none(),
             )?;
+            let mode = Some(crate::component_qa_ops::QaMode::Setup);
+            let qa_config_override = if let Some(mode) = mode {
+                if let Err(err) = crate::component_qa_ops::persist_answers_artifacts(
+                    &providers_root,
+                    &provider,
+                    mode,
+                    &answers,
+                ) {
+                    operator_log::warn(
+                        module_path!(),
+                        format!(
+                            "failed to persist qa answers provider={} mode={} flow={}: {err}",
+                            provider,
+                            mode.as_str(),
+                            setup_flow
+                        ),
+                    );
+                }
+                let current_config =
+                    crate::provider_config_envelope::read_provider_config_envelope(
+                        &providers_root,
+                        &provider,
+                    )?
+                    .map(|envelope| envelope.config);
+                crate::provider_config_envelope::ensure_contract_compatible(
+                    &providers_root,
+                    &provider,
+                    &setup_flow,
+                    &pack_path,
+                    options.allow_contract_change,
+                )?;
+                match crate::component_qa_ops::apply_answers_via_component_qa(
+                    config_dir,
+                    Domain::Messaging,
+                    &config.tenant,
+                    Some(&config.team),
+                    &crate::domains::ProviderPack {
+                        pack_id: provider.clone(),
+                        file_name: pack_path
+                            .file_name()
+                            .and_then(|value| value.to_str())
+                            .unwrap_or_default()
+                            .to_string(),
+                        path: pack_path.clone(),
+                        entry_flows: Vec::new(),
+                    },
+                    &provider,
+                    mode,
+                    current_config.as_ref(),
+                    &answers,
+                ) {
+                    Ok(value) => value,
+                    Err(diag) => {
+                        operator_log::error(
+                            module_path!(),
+                            format!(
+                                "component qa failed provider={} flow={} code={} message={}",
+                                provider,
+                                setup_flow,
+                                diag.code.as_str(),
+                                diag.message
+                            ),
+                        );
+                        return Err(anyhow::anyhow!("{diag}"));
+                    }
+                }
+            } else {
+                None
+            };
             let input = build_input(
                 &provider,
                 &config.tenant,
@@ -114,8 +186,31 @@ pub fn run_provider_setup(
                 public_base_url,
                 Some(&answers),
             )?;
+            let mut input = input;
+            if let Some(config_value) = qa_config_override.as_ref() {
+                input["config"] = config_value.clone();
+            }
             let output = runner_integration::run_flow(&runner, &pack_path, &setup_flow, &input)?;
             write_run_output(&setup_path, &provider, &setup_flow, &output)?;
+            if let Some(config_value) = qa_config_override
+                .or_else(|| extract_config_for_envelope(output.parsed.as_ref(), &input))
+                && let Err(err) = crate::provider_config_envelope::write_provider_config_envelope(
+                    &providers_root,
+                    &provider,
+                    &setup_flow,
+                    &config_value,
+                    &pack_path,
+                    options.backup,
+                )
+            {
+                operator_log::warn(
+                    module_path!(),
+                    format!(
+                        "failed to write provider config envelope provider={} flow={}: {err}",
+                        provider, setup_flow
+                    ),
+                );
+            }
 
             if options.verify_webhooks {
                 let verify_flow = cfg
@@ -256,6 +351,16 @@ fn build_input(
         payload["answers_json"] = Value::String(serde_json::to_string(answers)?);
     }
     Ok(payload)
+}
+
+fn extract_config_for_envelope(parsed: Option<&Value>, input: &Value) -> Option<Value> {
+    if let Some(parsed) = parsed {
+        if let Some(config) = parsed.get("config") {
+            return Some(config.clone());
+        }
+        return Some(parsed.clone());
+    }
+    input.get("config").cloned()
 }
 
 pub(crate) fn write_run_output(
