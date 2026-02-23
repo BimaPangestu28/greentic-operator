@@ -72,12 +72,24 @@ impl DemoRepl {
                             }
                         }
                     } else {
+                        let snapshot =
+                            Snapshot::new(output.clone(), None, self.pending_inputs.clone());
+                        self.history.push(snapshot);
+                        self.last_output = Some(output.clone());
                         if let Some(reason) = reason {
                             println!("Waiting for input: {reason}");
                         } else {
                             println!("Flow is waiting for input (no adaptive card detected).");
                         }
-                        continue;
+                        match self.command_loop() {
+                            Ok(_) => {}
+                            Err(err) => {
+                                if err.downcast_ref::<DemoReplQuit>().is_some() {
+                                    return Ok(());
+                                }
+                                return Err(err);
+                            }
+                        }
                     }
                 }
                 DemoBlockedOn::Finished(output) => {

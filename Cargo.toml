@@ -1,6 +1,6 @@
 [package]
 name = "greentic-operator"
-version = "0.4.25"
+version = "0.4.26"
 edition = "2024"
 rust-version = "1.91"
 description = "Greentic operator CLI for local dev and demo orchestration."
@@ -68,4 +68,3 @@ members = [
     "secret_name",
     "crates/greentic-secrets-repro",
 ]
-
