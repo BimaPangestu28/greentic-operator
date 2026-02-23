@@ -415,6 +415,7 @@ impl DemoRunnerHost {
                 tenant: ComponentTenantCtx {
                     tenant: ctx.tenant.clone(),
                     team: ctx.team.clone(),
+                    i18n_id: None,
                     user: None,
                     trace_id: None,
                     correlation_id: ctx.correlation_id.clone(),
@@ -424,6 +425,7 @@ impl DemoRunnerHost {
                 },
                 flow_id: op_id.to_string(),
                 node_id: Some(op_id.to_string()),
+                i18n_id: None,
             };
             pack_runtime
                 .invoke_provider(&binding, exec_ctx, op_id, payload)

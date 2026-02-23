@@ -14,18 +14,13 @@ pub struct OperatorConfig {
     #[serde(default)]
     pub binaries: BTreeMap<String, String>,
 }
-#[derive(Clone, Copy, Debug, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum DomainEnabledMode {
+    #[default]
     Auto,
     True,
     False,
-}
-
-impl Default for DomainEnabledMode {
-    fn default() -> Self {
-        Self::Auto
-    }
 }
 
 impl DomainEnabledMode {

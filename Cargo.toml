@@ -2,7 +2,7 @@
 name = "greentic-operator"
 version = "0.4.25"
 edition = "2024"
-rust-version = "1.90"
+rust-version = "1.91"
 description = "Greentic operator CLI for local dev and demo orchestration."
 license = "MIT"
 repository = "https://github.com/greentic-ai/greentic-operator"
@@ -36,8 +36,12 @@ zip = "8"
 chrono = "0.4"
 sysinfo = "0.38"
 directories-next = "2"
-greentic-runner-desktop = { version="0.4"}
-greentic-runner-host = { version="0.4" }
+greentic-runner-desktop = { version = "0.4" }
+greentic-runner-host = { version = "0.4" }
+greentic-interfaces = { version = "0.4" }
+greentic-interfaces-guest = { version = "0.4" }
+greentic-interfaces-host = { version = "0.4" }
+greentic-interfaces-wasmtime = { version = "0.4" }
 tokio = { version = "1", features = ["rt-multi-thread", "sync", "signal", "net"] }
 hyper = { version = "1", features = ["full"] }
 http-body-util = "0.1"
@@ -51,6 +55,7 @@ async-trait = "0.1"
 tracing = "0.1"
 tracing-subscriber = "0.3"
 jsonschema = "0.42"
+greentic-distributor-client = { version = "0.4", default-features = false, features = ["pack-fetch"] }
 
 [dev-dependencies]
 tempfile = "3.10"
@@ -63,3 +68,4 @@ members = [
     "secret_name",
     "crates/greentic-secrets-repro",
 ]
+

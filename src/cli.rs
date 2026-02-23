@@ -57,6 +57,7 @@ use crate::subscriptions_universal::{
     state_root,
     store::{AuthUserRefV1, SubscriptionStore},
 };
+use crate::wizard;
 use greentic_runner_host::secrets::default_manager;
 use greentic_types::{ChannelMessageEnvelope, Destination, EnvId, TeamId, TenantCtx, TenantId};
 use std::time::Duration;
@@ -150,6 +151,8 @@ enum DemoSubcommand {
     ListPacks(DemoListPacksArgs),
     #[command(about = "List flows declared by a pack")]
     ListFlows(DemoListFlowsArgs),
+    #[command(about = "Plan or create a demo bundle from pack refs and allow rules")]
+    Wizard(DemoWizardArgs),
 }
 
 #[derive(Parser)]
@@ -834,6 +837,60 @@ struct DemoPolicyArgs {
     team: Option<String>,
     #[arg(long, help = "Gmap path to allow or forbid.")]
     path: String,
+}
+
+#[derive(Parser)]
+#[command(
+    about = "Plan/create a demo bundle with pack refs and allow rules.",
+    long_about = "Builds a deterministic wizard plan first. Execution reuses the same gmap + resolver + resolved-copy lifecycle as demo allow.",
+    after_help = "Main options:\n  --mode <create|update|remove>\n  --bundle <DIR>\n\nOptional options:\n  --catalog-pack <ID> (repeatable)\n  --pack-ref <REF> (repeatable, oci://|repo://|store://)\n  --tenant <TENANT> (default: demo)\n  --team <TEAM>\n  --target <tenant[:team]> (repeatable)\n  --allow <PACK[/FLOW[/NODE]]> (repeatable)\n  --execute\n  --offline\n  --run-setup"
+)]
+struct DemoWizardArgs {
+    #[arg(long, value_enum, default_value_t = WizardModeArg::Create)]
+    mode: WizardModeArg,
+    #[arg(long, help = "Path to the demo bundle to create.")]
+    bundle: PathBuf,
+    #[arg(
+        long = "catalog-pack",
+        help = "Catalog pack id to include (repeatable)."
+    )]
+    catalog_packs: Vec<String>,
+    #[arg(long = "catalog-file", help = "Optional catalog JSON/YAML file.")]
+    catalog_file: Option<PathBuf>,
+    #[arg(
+        long = "pack-ref",
+        help = "Custom pack ref (oci://, repo://, store://); repeatable."
+    )]
+    pack_refs: Vec<String>,
+    #[arg(long, default_value = "demo", help = "Tenant for allow rules.")]
+    tenant: String,
+    #[arg(long, help = "Optional team for allow rules.")]
+    team: Option<String>,
+    #[arg(
+        long = "target",
+        help = "Tenant target in tenant[:team] form; repeatable."
+    )]
+    targets: Vec<String>,
+    #[arg(
+        long = "allow",
+        help = "Allow path PACK[/FLOW[/NODE]] for tenant/team; repeatable."
+    )]
+    allow_paths: Vec<String>,
+    #[arg(long, help = "Execute the plan. Without this, only prints plan.")]
+    execute: bool,
+    #[arg(long, help = "Resolve packs in offline mode (cache-only).")]
+    offline: bool,
+    #[arg(long, help = "Run existing provider setup flows after execution.")]
+    run_setup: bool,
+    #[arg(long, help = "Optional JSON/YAML setup-input passed to setup runner.")]
+    setup_input: Option<PathBuf>,
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum WizardModeArg {
+    Create,
+    Update,
+    Remove,
 }
 #[derive(Parser)]
 #[command(
@@ -1658,6 +1715,7 @@ impl DemoCommand {
             DemoSubcommand::Forbid(args) => args.run(Policy::Forbidden),
             DemoSubcommand::Subscriptions(args) => args.run(),
             DemoSubcommand::Run(args) => args.run(ctx),
+            DemoSubcommand::Wizard(args) => args.run(),
         }
     }
 }
@@ -2714,6 +2772,217 @@ impl DemoPolicyArgs {
         copy_resolved_manifest(&self.bundle, &self.tenant, effective_team.as_deref())?;
         Ok(())
     }
+}
+
+impl DemoWizardArgs {
+    fn run(self) -> anyhow::Result<()> {
+        let mode: wizard::WizardMode = self.mode.into();
+        let spec = wizard::spec(mode);
+        if demo_debug_enabled() {
+            println!(
+                "wizard qa spec mode={} questions={}",
+                spec.mode,
+                spec.questions.len()
+            );
+        }
+
+        let catalog_entries = if let Some(path) = self.catalog_file.clone().or_else(|| {
+            std::env::var("GREENTIC_OPERATOR_WIZARD_CATALOG")
+                .ok()
+                .map(PathBuf::from)
+        }) {
+            wizard::load_catalog_from_file(&path)?
+        } else {
+            let catalog = wizard::StaticCatalogSource;
+            wizard::CatalogSource::list(&catalog)
+        };
+        let by_id = catalog_entries
+            .into_iter()
+            .map(|entry| (entry.id.clone(), entry))
+            .collect::<std::collections::BTreeMap<_, _>>();
+        let mut refs = self.pack_refs.clone();
+        for id in &self.catalog_packs {
+            let item = by_id.get(id).ok_or_else(|| {
+                anyhow!(
+                    "unknown --catalog-pack {}; available: {}",
+                    id,
+                    by_id.keys().cloned().collect::<Vec<_>>().join(", ")
+                )
+            })?;
+            refs.push(item.reference.clone());
+        }
+
+        let mut tenants = Vec::new();
+        if self.targets.is_empty() {
+            tenants.push(wizard::TenantSelection {
+                tenant: self.tenant.clone(),
+                team: self.team.clone(),
+                allow_paths: self.allow_paths.clone(),
+            });
+        } else {
+            for target in &self.targets {
+                let (tenant, team) = parse_wizard_target(target)?;
+                tenants.push(wizard::TenantSelection {
+                    tenant,
+                    team,
+                    allow_paths: self.allow_paths.clone(),
+                });
+            }
+        }
+
+        let request = wizard::WizardCreateRequest {
+            bundle: self.bundle.clone(),
+            pack_refs: refs,
+            tenants,
+        };
+        let plan = wizard::apply(mode, &request, !self.execute)?;
+        wizard::print_plan_summary(&plan);
+
+        if !self.execute {
+            return Ok(());
+        }
+
+        if std::env::var("CI").is_err() && !wizard::confirm_execute()? {
+            println!("aborted");
+            return Ok(());
+        }
+
+        let report = wizard::execute_plan(mode, &plan, self.offline)?;
+        println!(
+            "wizard execute complete bundle={} packs={} manifests={}",
+            report.bundle.display(),
+            report.resolved_packs.len(),
+            report.resolved_manifests.len()
+        );
+        for manifest in &report.resolved_manifests {
+            println!("resolved manifest: {}", manifest.display());
+        }
+
+        if self.run_setup && mode != wizard::WizardMode::Remove {
+            let setup_provider_ids = report
+                .resolved_packs
+                .iter()
+                .filter(|pack| pack.entry_flows.iter().any(|flow| flow == "setup_default"))
+                .map(|pack| pack.pack_id.clone())
+                .collect::<BTreeSet<_>>();
+            let allowed_providers = if setup_provider_ids.is_empty() {
+                None
+            } else {
+                Some(setup_provider_ids)
+            };
+            let preloaded_setup_answers = if let Some(allowed) = allowed_providers.as_ref() {
+                Some(build_wizard_setup_answers(
+                    &plan.bundle,
+                    &report.resolved_packs,
+                    allowed,
+                    self.setup_input.as_ref(),
+                )?)
+            } else {
+                None
+            };
+            for tenant in &plan.metadata.tenants {
+                run_wizard_setup_for_target(
+                    &plan.bundle,
+                    &tenant.tenant,
+                    tenant.team.as_deref(),
+                    self.setup_input.as_ref(),
+                    allowed_providers.clone(),
+                    preloaded_setup_answers.clone(),
+                )?;
+            }
+        } else if self.run_setup && mode == wizard::WizardMode::Remove {
+            println!("skip setup for remove mode");
+        }
+        Ok(())
+    }
+}
+
+fn parse_wizard_target(input: &str) -> anyhow::Result<(String, Option<String>)> {
+    let trimmed = input.trim();
+    if trimmed.is_empty() {
+        return Err(anyhow!("target must not be empty"));
+    }
+    let mut parts = trimmed.splitn(2, ':');
+    let tenant = parts.next().unwrap_or_default().trim().to_string();
+    if tenant.is_empty() {
+        return Err(anyhow!("target tenant must not be empty"));
+    }
+    let team = parts
+        .next()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+    Ok((tenant, team))
+}
+
+fn run_wizard_setup_for_target(
+    bundle: &Path,
+    tenant: &str,
+    team: Option<&str>,
+    setup_input: Option<&PathBuf>,
+    allowed_providers: Option<BTreeSet<String>>,
+    preloaded_setup_answers: Option<SetupInputAnswers>,
+) -> anyhow::Result<()> {
+    for domain in [Domain::Messaging, Domain::Events, Domain::Secrets] {
+        run_domain_command(DomainRunArgs {
+            root: bundle.to_path_buf(),
+            state_root: None,
+            domain,
+            action: DomainAction::Setup,
+            tenant: tenant.to_string(),
+            team: team.map(|value| value.to_string()),
+            provider_filter: None,
+            dry_run: false,
+            format: PlanFormat::Text,
+            parallel: 1,
+            allow_missing_setup: true,
+            allow_contract_change: false,
+            backup: false,
+            online: false,
+            secrets_env: None,
+            runner_binary: None,
+            best_effort: true,
+            discovered_providers: None,
+            setup_input: if preloaded_setup_answers.is_some() {
+                None
+            } else {
+                setup_input.cloned()
+            },
+            allowed_providers: allowed_providers.clone(),
+            preloaded_setup_answers: preloaded_setup_answers.clone(),
+            public_base_url: None,
+            secrets_manager: None,
+        })?;
+    }
+    Ok(())
+}
+
+fn build_wizard_setup_answers(
+    bundle: &Path,
+    packs: &[wizard::ResolvedPackInfo],
+    allowed: &BTreeSet<String>,
+    setup_input: Option<&PathBuf>,
+) -> anyhow::Result<SetupInputAnswers> {
+    let base_input = if let Some(path) = setup_input {
+        let raw = load_setup_input(path)?;
+        Some(SetupInputAnswers::new(raw, allowed.clone())?)
+    } else {
+        None
+    };
+    let mut map = serde_json::Map::new();
+    for pack in packs {
+        if !allowed.contains(&pack.pack_id) {
+            continue;
+        }
+        let pack_path = bundle.join(&pack.output_path);
+        let answers = collect_setup_answers(
+            &pack_path,
+            &pack.pack_id,
+            base_input.as_ref(),
+            setup_input.is_none(),
+        )?;
+        map.insert(pack.pack_id.clone(), answers);
+    }
+    SetupInputAnswers::new(serde_json::Value::Object(map), allowed.clone())
 }
 
 impl DemoSendArgs {
@@ -4191,6 +4460,16 @@ impl From<DevProfileArg> for DevProfile {
         match value {
             DevProfileArg::Debug => DevProfile::Debug,
             DevProfileArg::Release => DevProfile::Release,
+        }
+    }
+}
+
+impl From<WizardModeArg> for wizard::WizardMode {
+    fn from(value: WizardModeArg) -> Self {
+        match value {
+            WizardModeArg::Create => wizard::WizardMode::Create,
+            WizardModeArg::Update => wizard::WizardMode::Update,
+            WizardModeArg::Remove => wizard::WizardMode::Remove,
         }
     }
 }

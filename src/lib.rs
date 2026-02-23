@@ -35,3 +35,4 @@ pub mod setup_input;
 pub mod state_layout;
 pub mod subscriptions_universal;
 pub mod supervisor;
+pub mod wizard;
