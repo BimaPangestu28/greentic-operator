@@ -1,5 +1,5 @@
 #[cfg(test)]
-mod tests {
+mod suite {
     use crate::messaging_universal::dlq;
     use crate::messaging_universal::dto::{HttpInV1, ProviderPayloadV1};
     use base64::Engine;
