@@ -22,6 +22,7 @@ use greentic_runner_host::{
     trace::TraceConfig,
     validate::ValidationConfig,
 };
+use greentic_types::cbor::canonical;
 use greentic_types::decode_pack_manifest;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value as JsonValue, json};
@@ -35,8 +36,8 @@ use crate::runner_integration::RunnerFlavor;
 use crate::runner_integration::run_flow_with_options;
 
 use crate::capabilities::{
-    CapabilityBinding, CapabilityInstallRecord, CapabilityRegistry, HookStage, ResolveScope,
-    is_binding_ready, write_install_record,
+    CapabilityBinding, CapabilityInstallRecord, CapabilityPackRecord, CapabilityRegistry,
+    HookStage, ResolveScope, is_binding_ready, write_install_record,
 };
 use crate::cards::CardRenderer;
 use crate::discovery;
@@ -89,10 +90,10 @@ struct OperationEnvelope {
     op_id: String,
     op_name: String,
     ctx: OperationEnvelopeContext,
-    payload: Vec<u8>,
-    meta: BTreeMap<String, String>,
+    payload_cbor: Vec<u8>,
+    meta_cbor: Option<Vec<u8>>,
     status: OperationStatus,
-    result: Option<JsonValue>,
+    result_cbor: Option<Vec<u8>>,
 }
 
 impl OperationEnvelope {
@@ -105,10 +106,10 @@ impl OperationEnvelope {
                 team: ctx.team.clone(),
                 correlation_id: ctx.correlation_id.clone(),
             },
-            payload: payload.to_vec(),
-            meta: BTreeMap::new(),
+            payload_cbor: payload.to_vec(),
+            meta_cbor: None,
             status: OperationStatus::Pending,
-            result: None,
+            result_cbor: None,
         }
     }
 }
@@ -188,7 +189,7 @@ impl DemoRunnerHost {
         };
         let mut catalog = HashMap::new();
         let mut packs_by_path = BTreeMap::new();
-        let mut pack_index: BTreeMap<PathBuf, String> = BTreeMap::new();
+        let mut pack_index: BTreeMap<PathBuf, CapabilityPackRecord> = BTreeMap::new();
         let provider_map = discovery
             .providers
             .iter()
@@ -203,7 +204,13 @@ impl DemoRunnerHost {
             };
             for pack in packs {
                 packs_by_path.insert(pack.path.clone(), pack.clone());
-                pack_index.insert(pack.path.clone(), pack.pack_id.clone());
+                pack_index.insert(
+                    pack.path.clone(),
+                    CapabilityPackRecord {
+                        pack_id: pack.pack_id.clone(),
+                        domain,
+                    },
+                );
                 let provider_type = provider_map
                     .get(&pack.path)
                     .cloned()
@@ -258,6 +265,7 @@ impl DemoRunnerHost {
                 cap_id: offer.cap_id,
                 stable_id: offer.stable_id,
                 pack_id: offer.pack_id,
+                domain: offer.domain,
                 pack_path: offer.pack_path,
                 provider_component_ref: offer.provider_component_ref,
                 provider_op: offer.provider_op,
@@ -306,7 +314,7 @@ impl DemoRunnerHost {
             team: ctx.team.clone(),
         };
         let Some(binding) = self.resolve_capability(cap_id, None, scope) else {
-            return Ok(missing_capability_outcome(cap_id, op));
+            return Ok(missing_capability_outcome(cap_id, op, None));
         };
         if !is_binding_ready(
             &self.bundle_root,
@@ -353,7 +361,7 @@ impl DemoRunnerHost {
         }
 
         let outcome = self.invoke_provider_component_op(
-            Domain::Messaging,
+            binding.domain,
             pack,
             &binding.pack_id,
             target_op,
@@ -366,7 +374,10 @@ impl DemoRunnerHost {
         } else {
             OperationStatus::Err
         };
-        envelope.result = outcome.output.clone();
+        envelope.result_cbor = outcome
+            .output
+            .as_ref()
+            .and_then(json_to_canonical_cbor);
         let post_chain = self.resolve_hook_chain(HookStage::Post, &envelope.op_name);
         let _ = self.evaluate_hook_chain(&post_chain, HookStage::Post, &mut envelope)?;
         self.emit_post_sub(&envelope);
@@ -415,7 +426,10 @@ impl DemoRunnerHost {
         } else {
             OperationStatus::Err
         };
-        envelope.result = outcome.output.clone();
+        envelope.result_cbor = outcome
+            .output
+            .as_ref()
+            .and_then(json_to_canonical_cbor);
 
         let post_chain = self.resolve_hook_chain(HookStage::Post, op_id);
         let _ = self.evaluate_hook_chain(&post_chain, HookStage::Post, &mut envelope)?;
@@ -534,7 +548,7 @@ impl DemoRunnerHost {
                 continue;
             };
 
-            let payload = serde_json::to_vec(&HookEvalRequest {
+            let payload = canonical::to_canonical_cbor(&HookEvalRequest {
                 stage: match stage {
                     HookStage::Pre => "pre",
                     HookStage::Post => "post",
@@ -542,14 +556,15 @@ impl DemoRunnerHost {
                 .to_string(),
                 op_name: envelope.op_name.clone(),
                 envelope: envelope.clone(),
-            })?;
+            })
+            .map_err(|err| anyhow!("failed to encode hook request as cbor: {err}"))?;
             let ctx = OperatorContext {
                 tenant: envelope.ctx.tenant.clone(),
                 team: envelope.ctx.team.clone(),
                 correlation_id: envelope.ctx.correlation_id.clone(),
             };
             let outcome = self.invoke_provider_component_op(
-                Domain::Messaging,
+                binding.domain,
                 pack,
                 &binding.pack_id,
                 &binding.provider_op,
@@ -571,13 +586,13 @@ impl DemoRunnerHost {
             let Some(output) = outcome.output else {
                 continue;
             };
-            let parsed: HookEvalResponse = match serde_json::from_value(output) {
+            let parsed: HookEvalResponse = match decode_hook_response(&output) {
                 Ok(value) => value,
                 Err(err) => {
                     operator_log::warn(
                         module_path!(),
                         format!(
-                            "hook response decode failed stage={:?} binding={} err={}",
+                            "hook response decode failed stage={:?} binding={} err={} (expected cbor, with legacy json fallback)",
                             stage, binding.stable_id, err
                         ),
                     );
@@ -889,7 +904,48 @@ fn secret_error_context(
     )
 }
 
-fn missing_capability_outcome(cap_id: &str, op_name: &str) -> FlowOutcome {
+fn json_to_canonical_cbor(value: &JsonValue) -> Option<Vec<u8>> {
+    canonical::to_canonical_cbor_allow_floats(value).ok()
+}
+
+fn decode_hook_response(value: &JsonValue) -> anyhow::Result<HookEvalResponse> {
+    if let Some(cbor) = extract_cbor_blob(value) {
+        if let Ok(parsed) = serde_cbor::from_slice::<HookEvalResponse>(&cbor) {
+            return Ok(parsed);
+        }
+    }
+    serde_json::from_value(value.clone())
+        .map_err(|err| anyhow!("hook response is not valid cbor or legacy json: {err}"))
+}
+
+fn extract_cbor_blob(value: &JsonValue) -> Option<Vec<u8>> {
+    match value {
+        JsonValue::Array(items) => items
+            .iter()
+            .map(|item| item.as_u64().and_then(|n| u8::try_from(n).ok()))
+            .collect::<Option<Vec<u8>>>(),
+        JsonValue::String(s) => general_purpose::STANDARD.decode(s).ok(),
+        JsonValue::Object(map) => {
+            for key in ["hook_decision_cbor_b64", "cbor_b64", "hook_decision_cbor"] {
+                let Some(raw) = map.get(key) else {
+                    continue;
+                };
+                if let JsonValue::String(s) = raw
+                    && let Ok(bytes) = general_purpose::STANDARD.decode(s)
+                {
+                    return Some(bytes);
+                }
+                if let Some(bytes) = extract_cbor_blob(raw) {
+                    return Some(bytes);
+                }
+            }
+            None
+        }
+        _ => None,
+    }
+}
+
+fn missing_capability_outcome(cap_id: &str, op_name: &str, component_id: Option<&str>) -> FlowOutcome {
     FlowOutcome {
         success: false,
         output: Some(json!({
@@ -898,11 +954,13 @@ fn missing_capability_outcome(cap_id: &str, op_name: &str) -> FlowOutcome {
                 "type": "MissingCapability",
                 "cap_id": cap_id,
                 "op_name": op_name,
+                "component_id": component_id,
             }
         })),
         raw: None,
         error: Some(format!(
-            "MissingCapability(cap_id={cap_id}, op_name={op_name})"
+            "MissingCapability(cap_id={cap_id}, op_name={op_name}, component_id={})",
+            component_id.unwrap_or("<unknown>")
         )),
         mode: RunnerExecutionMode::Exec,
     }

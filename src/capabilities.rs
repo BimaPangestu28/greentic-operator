@@ -8,6 +8,8 @@ use greentic_types::{ExtensionInline, decode_pack_manifest};
 use serde::Deserialize;
 use zip::ZipArchive;
 
+use crate::domains::Domain;
+
 pub const EXT_CAPABILITIES_V1: &str = "greentic.ext.capabilities.v1";
 pub const CAP_OP_HOOK_PRE: &str = "greentic.cap.op_hook.pre";
 pub const CAP_OP_HOOK_POST: &str = "greentic.cap.op_hook.post";
@@ -35,10 +37,17 @@ pub struct ResolveScope {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CapabilityPackRecord {
+    pub pack_id: String,
+    pub domain: Domain,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CapabilityBinding {
     pub cap_id: String,
     pub stable_id: String,
     pub pack_id: String,
+    pub domain: Domain,
     pub pack_path: PathBuf,
     pub provider_component_ref: String,
     pub provider_op: String,
@@ -51,6 +60,7 @@ pub struct CapabilityBinding {
 pub struct CapabilityOfferRecord {
     pub stable_id: String,
     pub pack_id: String,
+    pub domain: Domain,
     pub pack_path: PathBuf,
     pub cap_id: String,
     pub version: String,
@@ -69,10 +79,12 @@ pub struct CapabilityRegistry {
 }
 
 impl CapabilityRegistry {
-    pub fn build_from_pack_index(pack_index: &BTreeMap<PathBuf, String>) -> anyhow::Result<Self> {
+    pub fn build_from_pack_index(
+        pack_index: &BTreeMap<PathBuf, CapabilityPackRecord>,
+    ) -> anyhow::Result<Self> {
         let mut by_cap_id: BTreeMap<String, Vec<CapabilityOfferRecord>> = BTreeMap::new();
 
-        for (pack_path, pack_id) in pack_index {
+        for (pack_path, pack_record) in pack_index {
             let Some(ext) = read_capabilities_extension(pack_path)? else {
                 continue;
             };
@@ -82,7 +94,11 @@ impl CapabilityRegistry {
                     Some(id) if !id.trim().is_empty() => id,
                     _ => format!(
                         "{}::{}::{}::{}::{}",
-                        pack_id, offer.cap_id, offer.provider.component_ref, offer.provider.op, idx
+                        pack_record.pack_id,
+                        offer.cap_id,
+                        offer.provider.component_ref,
+                        offer.provider.op,
+                        idx
                     ),
                 };
                 let applies_to_ops = offer
@@ -95,7 +111,8 @@ impl CapabilityRegistry {
                     .or_default()
                     .push(CapabilityOfferRecord {
                         stable_id,
-                        pack_id: pack_id.clone(),
+                        pack_id: pack_record.pack_id.clone(),
+                        domain: pack_record.domain,
                         pack_path: pack_path.clone(),
                         cap_id: offer.cap_id,
                         version: offer.version,
@@ -142,6 +159,7 @@ impl CapabilityRegistry {
             cap_id: selected.cap_id.clone(),
             stable_id: selected.stable_id.clone(),
             pack_id: selected.pack_id.clone(),
+            domain: selected.domain,
             pack_path: selected.pack_path.clone(),
             provider_component_ref: selected.provider_component_ref.clone(),
             provider_op: selected.provider_op.clone(),
@@ -165,6 +183,7 @@ impl CapabilityRegistry {
                         cap_id: selected.cap_id.clone(),
                         stable_id: selected.stable_id.clone(),
                         pack_id: selected.pack_id.clone(),
+                        domain: selected.domain,
                         pack_path: selected.pack_path.clone(),
                         provider_component_ref: selected.provider_component_ref.clone(),
                         provider_op: selected.provider_op.clone(),
@@ -469,6 +488,7 @@ mod tests {
             cap_id: "greentic.cap.test".to_string(),
             stable_id: "offer.setup.01".to_string(),
             pack_id: "pack-test".to_string(),
+            domain: Domain::Messaging,
             pack_path: tmp.path().join("dummy.gtpack"),
             provider_component_ref: "component".to_string(),
             provider_op: "invoke".to_string(),
