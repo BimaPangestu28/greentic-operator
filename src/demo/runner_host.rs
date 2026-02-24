@@ -374,10 +374,7 @@ impl DemoRunnerHost {
         } else {
             OperationStatus::Err
         };
-        envelope.result_cbor = outcome
-            .output
-            .as_ref()
-            .and_then(json_to_canonical_cbor);
+        envelope.result_cbor = outcome.output.as_ref().and_then(json_to_canonical_cbor);
         let post_chain = self.resolve_hook_chain(HookStage::Post, &envelope.op_name);
         let _ = self.evaluate_hook_chain(&post_chain, HookStage::Post, &mut envelope)?;
         self.emit_post_sub(&envelope);
@@ -426,10 +423,7 @@ impl DemoRunnerHost {
         } else {
             OperationStatus::Err
         };
-        envelope.result_cbor = outcome
-            .output
-            .as_ref()
-            .and_then(json_to_canonical_cbor);
+        envelope.result_cbor = outcome.output.as_ref().and_then(json_to_canonical_cbor);
 
         let post_chain = self.resolve_hook_chain(HookStage::Post, op_id);
         let _ = self.evaluate_hook_chain(&post_chain, HookStage::Post, &mut envelope)?;
@@ -945,7 +939,11 @@ fn extract_cbor_blob(value: &JsonValue) -> Option<Vec<u8>> {
     }
 }
 
-fn missing_capability_outcome(cap_id: &str, op_name: &str, component_id: Option<&str>) -> FlowOutcome {
+fn missing_capability_outcome(
+    cap_id: &str,
+    op_name: &str,
+    component_id: Option<&str>,
+) -> FlowOutcome {
     FlowOutcome {
         success: false,
         output: Some(json!({
