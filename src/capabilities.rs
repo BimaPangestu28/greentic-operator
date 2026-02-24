@@ -139,16 +139,16 @@ impl CapabilityRegistry {
             version_matches(&offer.version, min_version) && scope_matches(&offer.scope, scope)
         })?;
         Some(CapabilityBinding {
-                cap_id: selected.cap_id.clone(),
-                stable_id: selected.stable_id.clone(),
-                pack_id: selected.pack_id.clone(),
-                pack_path: selected.pack_path.clone(),
-                provider_component_ref: selected.provider_component_ref.clone(),
-                provider_op: selected.provider_op.clone(),
-                version: selected.version.clone(),
-                requires_setup: selected.requires_setup,
-                setup_qa_ref: selected.setup_qa_ref.clone(),
-            })
+            cap_id: selected.cap_id.clone(),
+            stable_id: selected.stable_id.clone(),
+            pack_id: selected.pack_id.clone(),
+            pack_path: selected.pack_path.clone(),
+            provider_component_ref: selected.provider_component_ref.clone(),
+            provider_op: selected.provider_op.clone(),
+            version: selected.version.clone(),
+            requires_setup: selected.requires_setup,
+            setup_qa_ref: selected.setup_qa_ref.clone(),
+        })
     }
 
     pub fn resolve_hook_chain(&self, stage: HookStage, op_name: &str) -> Vec<CapabilityBinding> {
@@ -450,11 +450,8 @@ mod tests {
     #[test]
     fn install_record_roundtrip() {
         let tmp = tempdir().expect("tempdir");
-        let record = CapabilityInstallRecord::ready(
-            "greentic.cap.test",
-            "offer.test.01",
-            "pack-test",
-        );
+        let record =
+            CapabilityInstallRecord::ready("greentic.cap.test", "offer.test.01", "pack-test");
         let path = write_install_record(tmp.path(), "tenant-a", Some("team-b"), &record)
             .expect("write install record");
         assert!(path.exists());
@@ -479,8 +476,8 @@ mod tests {
             requires_setup: true,
             setup_qa_ref: Some("qa/setup.cbor".to_string()),
         };
-        let ready =
-            is_binding_ready(tmp.path(), "tenant-a", Some("team-b"), &binding).expect("ready check");
+        let ready = is_binding_ready(tmp.path(), "tenant-a", Some("team-b"), &binding)
+            .expect("ready check");
         assert!(!ready);
     }
 }

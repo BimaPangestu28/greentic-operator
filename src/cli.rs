@@ -16,6 +16,7 @@ use clap::{ArgAction, Parser, Subcommand, ValueEnum};
 use tokio::runtime::Runtime;
 
 use crate::bin_resolver::{self, ResolveCtx};
+use crate::capabilities::ResolveScope;
 use crate::config;
 use crate::config_gate::{self, ConfigGateItem, ConfigValueSource};
 use crate::demo::{
@@ -44,7 +45,6 @@ use crate::project::{self, ScanFormat};
 use crate::runner_exec;
 use crate::runner_integration;
 use crate::runtime_state::RuntimePaths;
-use crate::capabilities::ResolveScope;
 use crate::secrets_gate::{self, DynSecretsManager, SecretsManagerHandle};
 use crate::secrets_manager;
 use crate::secrets_setup::resolve_env;
@@ -1684,13 +1684,8 @@ impl DemoCapabilityInvokeArgs {
         )?;
         let secrets_handle =
             secrets_gate::resolve_secrets_manager(&self.bundle, &self.tenant, Some(&self.team))?;
-        let runner_host = DemoRunnerHost::new(
-            self.bundle.clone(),
-            &discovery,
-            None,
-            secrets_handle,
-            false,
-        )?;
+        let runner_host =
+            DemoRunnerHost::new(self.bundle.clone(), &discovery, None, secrets_handle, false)?;
         let ctx = OperatorContext {
             tenant: self.tenant.clone(),
             team: Some(self.team.clone()),
@@ -1703,7 +1698,8 @@ impl DemoCapabilityInvokeArgs {
             json!({})
         };
         let payload_bytes = serde_json::to_vec(&payload_value)?;
-        let outcome = runner_host.invoke_capability(&self.cap_id, &self.op, &payload_bytes, &ctx)?;
+        let outcome =
+            runner_host.invoke_capability(&self.cap_id, &self.op, &payload_bytes, &ctx)?;
         print_capability_outcome(&outcome)?;
         if !outcome.success {
             anyhow::bail!(
@@ -1729,13 +1725,8 @@ impl DemoCapabilitySetupPlanArgs {
         )?;
         let secrets_handle =
             secrets_gate::resolve_secrets_manager(&self.bundle, &self.tenant, Some(&self.team))?;
-        let runner_host = DemoRunnerHost::new(
-            self.bundle.clone(),
-            &discovery,
-            None,
-            secrets_handle,
-            false,
-        )?;
+        let runner_host =
+            DemoRunnerHost::new(self.bundle.clone(), &discovery, None, secrets_handle, false)?;
         let ctx = OperatorContext {
             tenant: self.tenant,
             team: Some(self.team),
@@ -1769,20 +1760,18 @@ impl DemoCapabilityMarkReadyArgs {
         )?;
         let secrets_handle =
             secrets_gate::resolve_secrets_manager(&self.bundle, &self.tenant, Some(&self.team))?;
-        let runner_host = DemoRunnerHost::new(
-            self.bundle.clone(),
-            &discovery,
-            None,
-            secrets_handle,
-            false,
-        )?;
+        let runner_host =
+            DemoRunnerHost::new(self.bundle.clone(), &discovery, None, secrets_handle, false)?;
         let scope = ResolveScope {
             env: env::var("GREENTIC_ENV").ok(),
             tenant: Some(self.tenant.clone()),
             team: Some(self.team.clone()),
         };
         let Some(binding) = runner_host.resolve_capability(&self.cap_id, None, scope) else {
-            anyhow::bail!("capability {} is not offered in current pack set", self.cap_id);
+            anyhow::bail!(
+                "capability {} is not offered in current pack set",
+                self.cap_id
+            );
         };
         let ctx = OperatorContext {
             tenant: self.tenant,
@@ -1804,20 +1793,18 @@ impl DemoCapabilityMarkFailedArgs {
         )?;
         let secrets_handle =
             secrets_gate::resolve_secrets_manager(&self.bundle, &self.tenant, Some(&self.team))?;
-        let runner_host = DemoRunnerHost::new(
-            self.bundle.clone(),
-            &discovery,
-            None,
-            secrets_handle,
-            false,
-        )?;
+        let runner_host =
+            DemoRunnerHost::new(self.bundle.clone(), &discovery, None, secrets_handle, false)?;
         let scope = ResolveScope {
             env: env::var("GREENTIC_ENV").ok(),
             tenant: Some(self.tenant.clone()),
             team: Some(self.team.clone()),
         };
         let Some(binding) = runner_host.resolve_capability(&self.cap_id, None, scope) else {
-            anyhow::bail!("capability {} is not offered in current pack set", self.cap_id);
+            anyhow::bail!(
+                "capability {} is not offered in current pack set",
+                self.cap_id
+            );
         };
         let ctx = OperatorContext {
             tenant: self.tenant,

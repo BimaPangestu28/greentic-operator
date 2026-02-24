@@ -34,11 +34,11 @@ use crate::runner_integration::RunFlowOptions;
 use crate::runner_integration::RunnerFlavor;
 use crate::runner_integration::run_flow_with_options;
 
-use crate::cards::CardRenderer;
 use crate::capabilities::{
     CapabilityBinding, CapabilityInstallRecord, CapabilityRegistry, HookStage, ResolveScope,
     is_binding_ready, write_install_record,
 };
+use crate::cards::CardRenderer;
 use crate::discovery;
 use crate::domains::{self, Domain, ProviderPack};
 use crate::operator_log;
@@ -237,7 +237,8 @@ impl DemoRunnerHost {
         min_version: Option<&str>,
         scope: ResolveScope,
     ) -> Option<CapabilityBinding> {
-        self.capability_registry.resolve(cap_id, min_version, &scope)
+        self.capability_registry
+            .resolve(cap_id, min_version, &scope)
     }
 
     pub fn resolve_hook_chain(&self, stage: HookStage, op_name: &str) -> Vec<CapabilityBinding> {
@@ -267,8 +268,13 @@ impl DemoRunnerHost {
             .collect()
     }
 
-    pub fn mark_capability_ready(&self, ctx: &OperatorContext, binding: &CapabilityBinding) -> anyhow::Result<PathBuf> {
-        let record = CapabilityInstallRecord::ready(&binding.cap_id, &binding.stable_id, &binding.pack_id);
+    pub fn mark_capability_ready(
+        &self,
+        ctx: &OperatorContext,
+        binding: &CapabilityBinding,
+    ) -> anyhow::Result<PathBuf> {
+        let record =
+            CapabilityInstallRecord::ready(&binding.cap_id, &binding.stable_id, &binding.pack_id);
         write_install_record(&self.bundle_root, &ctx.tenant, ctx.team.as_deref(), &record)
     }
 
@@ -302,8 +308,17 @@ impl DemoRunnerHost {
         let Some(binding) = self.resolve_capability(cap_id, None, scope) else {
             return Ok(missing_capability_outcome(cap_id, op));
         };
-        if !is_binding_ready(&self.bundle_root, &ctx.tenant, ctx.team.as_deref(), &binding)? {
-            return Ok(capability_not_installed_outcome(cap_id, op, &binding.stable_id));
+        if !is_binding_ready(
+            &self.bundle_root,
+            &ctx.tenant,
+            ctx.team.as_deref(),
+            &binding,
+        )? {
+            return Ok(capability_not_installed_outcome(
+                cap_id,
+                op,
+                &binding.stable_id,
+            ));
         }
 
         let Some(pack) = self.packs_by_path.get(&binding.pack_path) else {
@@ -321,9 +336,11 @@ impl DemoRunnerHost {
         };
 
         // Capability invocations go through the same operator pipeline.
-        let mut envelope = OperationEnvelope::new(&format!("cap.invoke:{cap_id}"), payload_bytes, ctx);
+        let mut envelope =
+            OperationEnvelope::new(&format!("cap.invoke:{cap_id}"), payload_bytes, ctx);
         let pre_chain = self.resolve_hook_chain(HookStage::Pre, &envelope.op_name);
-        let pre_hook_outcome = self.evaluate_hook_chain(&pre_chain, HookStage::Pre, &mut envelope)?;
+        let pre_hook_outcome =
+            self.evaluate_hook_chain(&pre_chain, HookStage::Pre, &mut envelope)?;
         self.emit_pre_sub(&envelope);
         if let HookChainOutcome::Denied(reason) = pre_hook_outcome {
             envelope.status = OperationStatus::Denied;
@@ -376,7 +393,8 @@ impl DemoRunnerHost {
     ) -> anyhow::Result<FlowOutcome> {
         let mut envelope = OperationEnvelope::new(op_id, payload_bytes, ctx);
         let pre_chain = self.resolve_hook_chain(HookStage::Pre, op_id);
-        let pre_hook_outcome = self.evaluate_hook_chain(&pre_chain, HookStage::Pre, &mut envelope)?;
+        let pre_hook_outcome =
+            self.evaluate_hook_chain(&pre_chain, HookStage::Pre, &mut envelope)?;
         self.emit_pre_sub(&envelope);
         if let HookChainOutcome::Denied(reason) = pre_hook_outcome {
             envelope.status = OperationStatus::Denied;
@@ -390,7 +408,8 @@ impl DemoRunnerHost {
             });
         }
 
-        let outcome = self.invoke_provider_op_inner(domain, provider_type, op_id, payload_bytes, ctx)?;
+        let outcome =
+            self.invoke_provider_op_inner(domain, provider_type, op_id, payload_bytes, ctx)?;
         envelope.status = if outcome.success {
             OperationStatus::Ok
         } else {
@@ -882,7 +901,9 @@ fn missing_capability_outcome(cap_id: &str, op_name: &str) -> FlowOutcome {
             }
         })),
         raw: None,
-        error: Some(format!("MissingCapability(cap_id={cap_id}, op_name={op_name})")),
+        error: Some(format!(
+            "MissingCapability(cap_id={cap_id}, op_name={op_name})"
+        )),
         mode: RunnerExecutionMode::Exec,
     }
 }
