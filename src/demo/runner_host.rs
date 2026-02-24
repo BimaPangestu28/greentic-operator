@@ -903,11 +903,10 @@ fn json_to_canonical_cbor(value: &JsonValue) -> Option<Vec<u8>> {
 }
 
 fn decode_hook_response(value: &JsonValue) -> anyhow::Result<HookEvalResponse> {
-    if let Some(cbor) = extract_cbor_blob(value) {
-        if let Ok(parsed) = serde_cbor::from_slice::<HookEvalResponse>(&cbor) {
+    if let Some(cbor) = extract_cbor_blob(value)
+        && let Ok(parsed) = serde_cbor::from_slice::<HookEvalResponse>(&cbor) {
             return Ok(parsed);
         }
-    }
     serde_json::from_value(value.clone())
         .map_err(|err| anyhow!("hook response is not valid cbor or legacy json: {err}"))
 }
