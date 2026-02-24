@@ -1,6 +1,6 @@
 [package]
 name = "greentic-operator"
-version = "0.4.27"
+version = "0.4.28"
 edition = "2024"
 rust-version = "1.91"
 description = "Greentic operator CLI for local dev and demo orchestration."
@@ -42,6 +42,7 @@ greentic-interfaces = { version = "0.4" }
 greentic-interfaces-guest = { version = "0.4" }
 greentic-interfaces-host = { version = "0.4" }
 greentic-interfaces-wasmtime = { version = "0.4" }
+greentic-qa-lib = "0.4"
 tokio = { version = "1", features = ["rt-multi-thread", "sync", "signal", "net"] }
 hyper = { version = "1", features = ["full"] }
 http-body-util = "0.1"
@@ -56,6 +57,7 @@ tracing = "0.1"
 tracing-subscriber = "0.3"
 jsonschema = "0.42"
 greentic-distributor-client = { version = "0.4", default-features = false, features = ["pack-fetch"] }
+oci-distribution = { version = "0.11", default-features = false, features = ["rustls-tls"] }
 
 [dev-dependencies]
 tempfile = "3.10"

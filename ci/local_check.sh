@@ -12,9 +12,9 @@ pushd "$ROOT_DIR" >/dev/null
 echo "[local_check] cargo fmt --check"
 cargo fmt --check
 echo "[local_check] cargo clippy"
-cargo clippy -- -D warnings
-echo "[local_check] cargo test"
-cargo test
+cargo clippy --locked -- -D warnings
+echo "[local_check] cargo test --locked"
+cargo test --locked
 
 if command -v rg >/dev/null 2>&1; then
   HAS_PATH_DEPS="$(rg -n "path\\s*=" -g "Cargo.toml" "$ROOT_DIR" || true)"

@@ -1,7 +1,9 @@
 use std::{
+    borrow::Cow,
     collections::{BTreeMap, BTreeSet},
     convert::TryFrom,
     env, fs,
+    io::{self, IsTerminal, Write},
     net::SocketAddr,
     path::{Path, PathBuf},
     sync::Arc,
@@ -9,6 +11,7 @@ use std::{
 
 use anyhow::{Context, anyhow};
 use chrono::{TimeZone, Utc};
+use serde::Deserialize;
 use serde_json::{Map as JsonMap, Value as JsonValue, json};
 
 use base64::Engine as _;
@@ -42,6 +45,7 @@ use crate::messaging_universal::{
 };
 use crate::operator_log;
 use crate::project::{self, ScanFormat};
+use crate::provider_registry;
 use crate::runner_exec;
 use crate::runner_integration;
 use crate::runtime_state::RuntimePaths;
@@ -59,6 +63,13 @@ use crate::subscriptions_universal::{
     store::{AuthUserRefV1, SubscriptionStore},
 };
 use crate::wizard;
+use crate::wizard_executor;
+use crate::wizard_plan_builder;
+use crate::wizard_spec_builder;
+use greentic_qa_lib::{
+    I18nConfig, QaLibError, QaRunner, ResolvedI18nMap, WizardDriver, WizardFrontend,
+    WizardRunConfig,
+};
 use greentic_runner_host::secrets::default_manager;
 use greentic_types::{ChannelMessageEnvelope, Destination, EnvId, TeamId, TenantCtx, TenantId};
 use std::time::Duration;
@@ -82,6 +93,10 @@ enum Command {
     #[command(hide = true)]
     Dev(DevCommand),
     Demo(Box<DemoCommand>),
+    #[command(
+        about = "Alias of demo wizard. Plan/create a demo bundle with pack refs and allow rules."
+    )]
+    Wizard(DemoWizardArgs),
 }
 
 #[derive(Parser)]
@@ -154,7 +169,9 @@ enum DemoSubcommand {
     ListPacks(DemoListPacksArgs),
     #[command(about = "List flows declared by a pack")]
     ListFlows(DemoListFlowsArgs),
-    #[command(about = "Plan or create a demo bundle from pack refs and allow rules")]
+    #[command(
+        about = "Alias of wizard. Plan or create a demo bundle from pack refs and allow rules"
+    )]
     Wizard(DemoWizardArgs),
 }
 
@@ -846,13 +863,18 @@ struct DemoPolicyArgs {
 #[command(
     about = "Plan/create a demo bundle with pack refs and allow rules.",
     long_about = "Builds a deterministic wizard plan first. Execution reuses the same gmap + resolver + resolved-copy lifecycle as demo allow.",
-    after_help = "Main options:\n  --mode <create|update|remove>\n  --bundle <DIR>\n\nOptional options:\n  --catalog-pack <ID> (repeatable)\n  --pack-ref <REF> (repeatable, oci://|repo://|store://)\n  --tenant <TENANT> (default: demo)\n  --team <TEAM>\n  --target <tenant[:team]> (repeatable)\n  --allow <PACK[/FLOW[/NODE]]> (repeatable)\n  --execute\n  --offline\n  --run-setup"
+    after_help = "Main options:\n  --mode <create|update|remove>\n  --bundle <DIR> (or provide in --qa-answers)\n\nOptional options:\n  --qa-answers <PATH>\n  --catalog-pack <ID> (repeatable)\n  --pack-ref <REF> (repeatable, oci://|repo://|store://)\n  --provider-registry <REF>\n  --locale <TAG> (default: en-GB)\n  --tenant <TENANT> (default: demo)\n  --team <TEAM>\n  --target <tenant[:team]> (repeatable)\n  --allow <PACK[/FLOW[/NODE]]> (repeatable)\n  --execute\n  --dry-run\n  --offline\n  --verbose\n  --run-setup"
 )]
 struct DemoWizardArgs {
     #[arg(long, value_enum, default_value_t = WizardModeArg::Create)]
     mode: WizardModeArg,
     #[arg(long, help = "Path to the demo bundle to create.")]
-    bundle: PathBuf,
+    bundle: Option<PathBuf>,
+    #[arg(
+        long = "qa-answers",
+        help = "Optional JSON/YAML answers emitted by greentic-qa."
+    )]
+    qa_answers: Option<PathBuf>,
     #[arg(
         long = "catalog-pack",
         help = "Catalog pack id to include (repeatable)."
@@ -865,6 +887,11 @@ struct DemoWizardArgs {
         help = "Custom pack ref (oci://, repo://, store://); repeatable."
     )]
     pack_refs: Vec<String>,
+    #[arg(
+        long = "provider-registry",
+        help = "Provider registry override (file://<path> or local path)."
+    )]
+    provider_registry: Option<String>,
     #[arg(long, default_value = "demo", help = "Tenant for allow rules.")]
     tenant: String,
     #[arg(long, help = "Optional team for allow rules.")]
@@ -879,10 +906,28 @@ struct DemoWizardArgs {
         help = "Allow path PACK[/FLOW[/NODE]] for tenant/team; repeatable."
     )]
     allow_paths: Vec<String>,
-    #[arg(long, help = "Execute the plan. Without this, only prints plan.")]
+    #[arg(
+        long,
+        conflicts_with = "dry_run",
+        help = "Execute the plan. Without this, only prints plan."
+    )]
     execute: bool,
+    #[arg(
+        long,
+        conflicts_with = "execute",
+        help = "Force plan-only mode (dry-run)."
+    )]
+    dry_run: bool,
     #[arg(long, help = "Resolve packs in offline mode (cache-only).")]
     offline: bool,
+    #[arg(
+        long,
+        default_value = "en-GB",
+        help = "Locale tag for wizard QA rendering."
+    )]
+    locale: String,
+    #[arg(long, help = "Print detailed plan step fields.")]
+    verbose: bool,
     #[arg(long, help = "Run existing provider setup flows after execution.")]
     run_setup: bool,
     #[arg(long, help = "Optional JSON/YAML setup-input passed to setup runner.")]
@@ -895,6 +940,129 @@ enum WizardModeArg {
     Update,
     Remove,
 }
+
+#[derive(Debug, Default, Deserialize)]
+struct WizardQaAnswers {
+    #[serde(alias = "bundle_path")]
+    bundle: Option<PathBuf>,
+    bundle_name: Option<String>,
+    #[serde(default)]
+    catalog_packs: Vec<WizardCatalogPackAnswer>,
+    #[serde(default)]
+    pack_refs: Vec<WizardPackRefAnswer>,
+    tenant: Option<String>,
+    team: Option<String>,
+    #[serde(default)]
+    targets: Vec<WizardTargetAnswer>,
+    #[serde(default)]
+    allow_paths: Vec<String>,
+    #[serde(default)]
+    providers: Vec<WizardProviderAnswer>,
+    #[serde(default)]
+    update_ops: Vec<WizardUpdateOpAnswer>,
+    #[serde(default)]
+    packs_remove: Vec<WizardPackRemoveAnswer>,
+    #[serde(default)]
+    providers_remove: Vec<WizardProviderAnswer>,
+    #[serde(default)]
+    tenants_remove: Vec<WizardTargetAnswer>,
+    #[serde(default)]
+    access_change: Vec<WizardAccessChangeAnswer>,
+    access_mode: Option<String>,
+    #[serde(default)]
+    remove_targets: Vec<WizardRemoveTargetAnswer>,
+    locale: Option<String>,
+    execution_mode: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum WizardCatalogPackAnswer {
+    Id(String),
+    Item { id: String },
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum WizardPackRefAnswer {
+    Ref(String),
+    Item {
+        pack_ref: String,
+        #[serde(default)]
+        tenant_id: Option<String>,
+        #[serde(default)]
+        team_id: Option<String>,
+        #[serde(default)]
+        make_default_scope: Option<String>,
+    },
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum WizardTargetAnswer {
+    Target(String),
+    Item {
+        tenant_id: String,
+        #[serde(default)]
+        team_id: Option<String>,
+    },
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum WizardProviderAnswer {
+    Id(String),
+    Item {
+        provider_id: Option<String>,
+        id: Option<String>,
+    },
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum WizardUpdateOpAnswer {
+    Op(String),
+    Item { op: String },
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum WizardRemoveTargetAnswer {
+    Target(String),
+    Item {
+        target_type: Option<String>,
+        target: Option<String>,
+    },
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum WizardPackRemoveAnswer {
+    Pack(String),
+    Item {
+        pack_identifier: Option<String>,
+        pack_id: Option<String>,
+        pack_ref: Option<String>,
+        scope: Option<String>,
+        tenant_id: Option<String>,
+        team_id: Option<String>,
+    },
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum WizardAccessChangeAnswer {
+    Item {
+        pack_id: Option<String>,
+        pack_ref: Option<String>,
+        operation: Option<String>,
+        tenant_id: String,
+        #[serde(default)]
+        team_id: Option<String>,
+    },
+}
+
+const DEFAULT_PROVIDER_REGISTRY_REF: &str = "oci://ghcr.io/greenticai/registries/providers:latest";
 #[derive(Parser)]
 #[command(
     about = "Show demo service status using runtime state.",
@@ -1885,6 +2053,7 @@ impl Cli {
         match self.command {
             Command::Dev(dev) => dev.run(&mut ctx),
             Command::Demo(demo) => demo.run(&ctx),
+            Command::Wizard(args) => args.run(),
         }
     }
 }
@@ -3028,31 +3197,98 @@ impl DemoPolicyArgs {
 impl DemoWizardArgs {
     fn run(self) -> anyhow::Result<()> {
         let mode: wizard::WizardMode = self.mode.into();
-        let spec = wizard::spec(mode);
-        if demo_debug_enabled() {
-            println!(
-                "wizard qa spec mode={} questions={}",
-                spec.mode,
-                spec.questions.len()
-            );
-        }
-
-        let catalog_entries = if let Some(path) = self.catalog_file.clone().or_else(|| {
-            std::env::var("GREENTIC_OPERATOR_WIZARD_CATALOG")
-                .ok()
-                .map(PathBuf::from)
-        }) {
+        let provider_registry_ref = self
+            .provider_registry
+            .clone()
+            .or_else(|| std::env::var("GTC_PROVIDER_REGISTRY_REF").ok())
+            .unwrap_or_else(|| DEFAULT_PROVIDER_REGISTRY_REF.to_string());
+        let qa_catalog_bundle_hint = self.bundle.clone().unwrap_or_else(|| PathBuf::from("."));
+        let qa_catalog_path = provider_registry::resolve_catalog_path(
+            self.catalog_file.clone().or_else(|| {
+                std::env::var("GREENTIC_OPERATOR_WIZARD_CATALOG")
+                    .ok()
+                    .map(PathBuf::from)
+            }),
+            Some(provider_registry_ref.as_str()),
+            self.offline,
+            &qa_catalog_bundle_hint,
+        )?;
+        let qa_catalog_entries = {
+            let path = qa_catalog_path.ok_or_else(|| {
+                anyhow!(
+                    "provider registry is required; set --provider-registry <ref> or GTC_PROVIDER_REGISTRY_REF"
+                )
+            })?;
             wizard::load_catalog_from_file(&path)?
-        } else {
-            let catalog = wizard::StaticCatalogSource;
-            wizard::CatalogSource::list(&catalog)
         };
+        let qa_provider_ids = qa_catalog_entries
+            .iter()
+            .map(|entry| entry.id.clone())
+            .collect::<Vec<_>>();
+        let prefilled_answers = build_prefilled_wizard_answers_from_cli(&self);
+        let mut answers = if let Some(path) = self.qa_answers.as_ref() {
+            load_wizard_qa_answers(path)?
+        } else {
+            run_wizard_via_qa(mode, &self.locale, prefilled_answers, &qa_provider_ids)?
+        };
+        merge_cli_overrides_into_wizard_answers(&mut answers, &self);
+
+        let bundle = self
+            .bundle
+            .clone()
+            .or(answers.bundle.clone())
+            .ok_or_else(|| anyhow!("bundle path is required via --bundle or wizard answers"))?;
+
+        let catalog_path = provider_registry::resolve_catalog_path(
+            self.catalog_file.clone().or_else(|| {
+                std::env::var("GREENTIC_OPERATOR_WIZARD_CATALOG")
+                    .ok()
+                    .map(PathBuf::from)
+            }),
+            Some(provider_registry_ref.as_str()),
+            self.offline,
+            &bundle,
+        )?;
+
+        let catalog_path = catalog_path.ok_or_else(|| {
+            anyhow!(
+                "provider registry is required; set --provider-registry <ref> or GTC_PROVIDER_REGISTRY_REF"
+            )
+        })?;
+        let catalog_entries = wizard::load_catalog_from_file(&catalog_path)?;
+        if mode != wizard::WizardMode::Create || bundle.exists() {
+            if let Some(local_path) = parse_local_registry_ref(provider_registry_ref.as_str()) {
+                if local_path.exists() {
+                    let _ = provider_registry::cache_registry_file(
+                        &bundle,
+                        provider_registry_ref.as_str(),
+                        &local_path,
+                    );
+                }
+            } else if catalog_path.exists() {
+                let _ = provider_registry::cache_registry_file(
+                    &bundle,
+                    provider_registry_ref.as_str(),
+                    &catalog_path,
+                );
+            }
+        }
         let by_id = catalog_entries
             .into_iter()
             .map(|entry| (entry.id.clone(), entry))
             .collect::<std::collections::BTreeMap<_, _>>();
-        let mut refs = self.pack_refs.clone();
-        for id in &self.catalog_packs {
+        let mut refs = normalize_pack_refs(&answers.pack_refs);
+        refs.extend(self.pack_refs.clone());
+        let provider_ids = normalize_provider_ids(&answers.providers);
+        for provider_id in &provider_ids {
+            if let Some(item) = by_id.get(provider_id) {
+                refs.push(item.reference.clone());
+            }
+        }
+
+        let mut catalog_ids = normalize_catalog_packs(&answers.catalog_packs);
+        catalog_ids.extend(self.catalog_packs.clone());
+        for id in &catalog_ids {
             let item = by_id.get(id).ok_or_else(|| {
                 anyhow!(
                     "unknown --catalog-pack {}; available: {}",
@@ -3064,49 +3300,114 @@ impl DemoWizardArgs {
         }
 
         let mut tenants = Vec::new();
-        if self.targets.is_empty() {
+        let merged_allow_paths = if self.allow_paths.is_empty() {
+            answers.allow_paths.clone()
+        } else {
+            self.allow_paths.clone()
+        };
+        let merged_targets = if self.targets.is_empty() {
+            normalize_targets(&answers.targets)
+        } else {
+            self.targets.clone()
+        };
+        if merged_targets.is_empty() {
             tenants.push(wizard::TenantSelection {
-                tenant: self.tenant.clone(),
-                team: self.team.clone(),
-                allow_paths: self.allow_paths.clone(),
+                tenant: if self.tenant == "demo" {
+                    answers.tenant.unwrap_or(self.tenant.clone())
+                } else {
+                    self.tenant.clone()
+                },
+                team: self.team.clone().or(answers.team.clone()),
+                allow_paths: merged_allow_paths.clone(),
             });
         } else {
-            for target in &self.targets {
+            for target in &merged_targets {
                 let (tenant, team) = parse_wizard_target(target)?;
                 tenants.push(wizard::TenantSelection {
                     tenant,
                     team,
-                    allow_paths: self.allow_paths.clone(),
+                    allow_paths: merged_allow_paths.clone(),
                 });
             }
         }
 
+        let update_ops = normalize_update_ops(&answers.update_ops);
+        let remove_targets = normalize_remove_targets(&answers.remove_targets);
+        let packs_remove = normalize_pack_removes(&answers.packs_remove)?;
+        let providers_remove = normalize_provider_ids(&answers.providers_remove);
+        let tenants_remove = normalize_target_selections(&answers.tenants_remove);
+        let access_changes = build_access_changes(
+            mode,
+            answers.access_mode.as_deref(),
+            &tenants,
+            &refs,
+            normalize_access_changes(&answers.access_change),
+        )?;
+        let default_assignments = normalize_default_assignments_from_pack_refs(&answers.pack_refs)?;
+
         let request = wizard::WizardCreateRequest {
-            bundle: self.bundle.clone(),
+            bundle: bundle.clone(),
+            bundle_name: answers.bundle_name.clone(),
             pack_refs: refs,
             tenants,
+            default_assignments,
+            providers: provider_ids,
+            update_ops,
+            remove_targets,
+            packs_remove,
+            providers_remove,
+            tenants_remove,
+            access_changes,
         };
-        let plan = wizard::apply(mode, &request, !self.execute)?;
+        let qa_execute = matches!(answers.execution_mode.as_deref(), Some("execute"));
+        let execute_requested = if self.execute || self.dry_run {
+            self.execute
+        } else {
+            qa_execute
+        };
+        let dry_run = if self.execute || self.dry_run {
+            self.dry_run || !self.execute
+        } else {
+            !qa_execute
+        };
+        let plan = wizard_plan_builder::build_plan(mode, &request, dry_run)?;
         wizard::print_plan_summary(&plan);
+        if self.verbose {
+            for step in &plan.steps {
+                if step.details.is_empty() {
+                    println!("step details {:?}: <none>", step.kind);
+                    continue;
+                }
+                println!("step details {:?}:", step.kind);
+                for (key, value) in &step.details {
+                    println!("  {}={}", key, value);
+                }
+            }
+        }
 
-        if !self.execute {
+        if !execute_requested {
             return Ok(());
         }
 
-        if std::env::var("CI").is_err() && !wizard::confirm_execute()? {
-            println!("aborted");
-            return Ok(());
-        }
-
-        let report = wizard::execute_plan(mode, &plan, self.offline)?;
+        let report = wizard_executor::execute(mode, &plan, self.offline)?;
+        let no_op_count = plan
+            .steps
+            .iter()
+            .filter(|step| step.kind == wizard::WizardStepKind::NoOp)
+            .count();
         println!(
-            "wizard execute complete bundle={} packs={} manifests={}",
+            "wizard execute complete bundle={} packs={} manifests={} providers={} no_ops={}",
             report.bundle.display(),
             report.resolved_packs.len(),
-            report.resolved_manifests.len()
+            report.resolved_manifests.len(),
+            report.provider_updates,
+            no_op_count
         );
         for manifest in &report.resolved_manifests {
             println!("resolved manifest: {}", manifest.display());
+        }
+        for warning in &report.warnings {
+            println!("warning: {warning}");
         }
 
         if self.run_setup && mode != wizard::WizardMode::Remove {
@@ -3163,6 +3464,814 @@ fn parse_wizard_target(input: &str) -> anyhow::Result<(String, Option<String>)> 
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty());
     Ok((tenant, team))
+}
+
+fn load_wizard_qa_answers(path: &Path) -> anyhow::Result<WizardQaAnswers> {
+    let raw = std::fs::read_to_string(path)
+        .with_context(|| format!("read qa answers {}", path.display()))?;
+    let value: JsonValue = serde_json::from_str(&raw)
+        .or_else(|_| serde_yaml_bw::from_str(&raw))
+        .with_context(|| format!("parse qa answers {}", path.display()))?;
+    parse_wizard_qa_answers_value(value)
+}
+
+fn parse_wizard_qa_answers_value(value: JsonValue) -> anyhow::Result<WizardQaAnswers> {
+    serde_json::from_value(value).context("parse wizard answers object")
+}
+
+fn run_wizard_via_qa(
+    mode: wizard::WizardMode,
+    locale: &str,
+    initial_answers: JsonValue,
+    provider_ids: &[String],
+) -> anyhow::Result<WizardQaAnswers> {
+    let spec = wizard_spec_builder::build_validation_form_with_providers(mode, provider_ids);
+    let prefilled_answers = initial_answers.clone();
+    let config = WizardRunConfig {
+        spec_json: spec.to_string(),
+        initial_answers_json: Some(initial_answers.to_string()),
+        frontend: WizardFrontend::Text,
+        i18n: I18nConfig {
+            locale: Some(locale.to_string()),
+            resolved: Some(load_wizard_i18n(locale)?),
+            debug: false,
+        },
+        verbose: false,
+    };
+    let interactive = io::stdin().is_terminal() && io::stdout().is_terminal();
+    let result = if interactive {
+        let mut driver = WizardDriver::new(config)
+            .map_err(|err| anyhow!("wizard QA flow failed (greentic-qa-lib): {err}"))?;
+        loop {
+            let _ = driver
+                .next_payload_json()
+                .map_err(|err| anyhow!("wizard QA flow failed (greentic-qa-lib): {err}"))?;
+            if driver.is_complete() {
+                break;
+            }
+            let ui_raw = driver.last_ui_json().ok_or_else(|| {
+                anyhow!("wizard QA flow failed (greentic-qa-lib): missing ui payload")
+            })?;
+            let ui: JsonValue = serde_json::from_str(ui_raw)
+                .with_context(|| "wizard QA flow failed (greentic-qa-lib): parse ui payload")?;
+            let question_id = ui
+                .get("next_question_id")
+                .and_then(JsonValue::as_str)
+                .ok_or_else(|| {
+                    anyhow!("wizard QA flow failed (greentic-qa-lib): missing next_question_id")
+                })?
+                .to_string();
+            let mut patch = JsonMap::new();
+            patch.insert(
+                question_id.clone(),
+                answer_for_question(&prefilled_answers, &ui, &question_id)?,
+            );
+            loop {
+                let submit = driver
+                    .submit_patch_json(&JsonValue::Object(patch.clone()).to_string())
+                    .map_err(|err| anyhow!("wizard QA flow failed (greentic-qa-lib): {err}"))?;
+                if submit.status != "error" {
+                    break;
+                }
+                let response: JsonValue = serde_json::from_str(&submit.response_json)
+                    .with_context(
+                        || "wizard QA flow failed (greentic-qa-lib): parse validation response",
+                    )?;
+                let missing_required = extract_missing_required(&response);
+                if missing_required.is_empty() {
+                    return Err(anyhow!(
+                        "wizard QA flow failed (greentic-qa-lib): validation failed: {}",
+                        submit.response_json
+                    ));
+                }
+                for missing in missing_required {
+                    if patch.contains_key(&missing) {
+                        continue;
+                    }
+                    patch.insert(
+                        missing.clone(),
+                        answer_for_question(&prefilled_answers, &ui, &missing)?,
+                    );
+                }
+            }
+        }
+        driver
+            .finish()
+            .map_err(|err| anyhow!("wizard QA flow failed (greentic-qa-lib): {err}"))?
+    } else {
+        match QaRunner::run_wizard_non_interactive(config) {
+            Ok(result) => result,
+            Err(QaLibError::NeedsInteraction) => {
+                return Err(anyhow!(
+                    "wizard requires additional answers. Re-run with --qa-answers <PATH> generated by greentic-qa."
+                ));
+            }
+            Err(err) => return Err(anyhow!("wizard QA flow failed (greentic-qa-lib): {err}")),
+        }
+    };
+    parse_wizard_qa_answers_value(result.answer_set.answers)
+}
+
+fn prefilled_answer_for_question(
+    prefilled_answers: &JsonValue,
+    question_id: &str,
+) -> Option<JsonValue> {
+    let value = prefilled_answers.get(question_id)?;
+    if value.is_null() {
+        return None;
+    }
+    Some(value.clone())
+}
+
+fn answer_for_question(
+    prefilled_answers: &JsonValue,
+    ui: &JsonValue,
+    question_id: &str,
+) -> anyhow::Result<JsonValue> {
+    if let Some(value) = prefilled_answer_for_question(prefilled_answers, question_id) {
+        return Ok(value);
+    }
+    let question = question_for_id(ui, question_id)?;
+    prompt_for_wizard_answer(question_id, question)
+        .map_err(|err| anyhow!("wizard QA flow failed (greentic-qa-lib): {err}"))
+}
+
+fn question_for_id<'a>(ui: &'a JsonValue, question_id: &str) -> anyhow::Result<&'a JsonValue> {
+    ui.get("questions")
+        .and_then(JsonValue::as_array)
+        .and_then(|questions| {
+            questions.iter().find(|question| {
+                question.get("id").and_then(JsonValue::as_str) == Some(question_id)
+            })
+        })
+        .ok_or_else(|| {
+            anyhow!(
+                "wizard QA flow failed (greentic-qa-lib): missing question {}",
+                question_id
+            )
+        })
+}
+
+fn extract_missing_required(response: &JsonValue) -> Vec<String> {
+    response
+        .get("validation")
+        .and_then(|validation| validation.get("missing_required"))
+        .and_then(JsonValue::as_array)
+        .map(|values| {
+            values
+                .iter()
+                .filter_map(JsonValue::as_str)
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default()
+}
+
+fn prompt_for_wizard_answer(
+    question_id: &str,
+    question: &JsonValue,
+) -> Result<JsonValue, QaLibError> {
+    let title = question
+        .get("title")
+        .and_then(JsonValue::as_str)
+        .unwrap_or(question_id);
+    let required = question
+        .get("required")
+        .and_then(JsonValue::as_bool)
+        .unwrap_or(false);
+    let kind = question
+        .get("type")
+        .and_then(JsonValue::as_str)
+        .unwrap_or("string");
+
+    match kind {
+        "string" => prompt_string_value(title, required),
+        "enum" => prompt_enum_value(question_id, title, required, question),
+        "list" => prompt_list_value(title, required, question),
+        _ => prompt_string_value(title, required),
+    }
+}
+
+fn prompt_string_value(title: &str, required: bool) -> Result<JsonValue, QaLibError> {
+    loop {
+        print!("{title}: ");
+        io::stdout()
+            .flush()
+            .map_err(|err| QaLibError::Component(err.to_string()))?;
+        let mut input = String::new();
+        let read = io::stdin()
+            .read_line(&mut input)
+            .map_err(|err| QaLibError::Component(err.to_string()))?;
+        if read == 0 {
+            return Err(QaLibError::Component("stdin closed".to_string()));
+        }
+        let trimmed = input.trim();
+        if trimmed.is_empty() {
+            if required {
+                println!("value is required");
+                continue;
+            }
+            return Ok(JsonValue::Null);
+        }
+        return Ok(JsonValue::String(trimmed.to_string()));
+    }
+}
+
+fn prompt_enum_value(
+    question_id: &str,
+    title: &str,
+    required: bool,
+    question: &JsonValue,
+) -> Result<JsonValue, QaLibError> {
+    let choices = question
+        .get("choices")
+        .and_then(JsonValue::as_array)
+        .ok_or_else(|| QaLibError::MissingField("choices".to_string()))?
+        .iter()
+        .filter_map(JsonValue::as_str)
+        .map(ToString::to_string)
+        .collect::<Vec<_>>();
+    if choices.is_empty() {
+        return Err(QaLibError::MissingField("choices".to_string()));
+    }
+    loop {
+        println!("{title}:");
+        for (idx, choice) in choices.iter().enumerate() {
+            println!("  {}. {}", idx + 1, enum_choice_label(question_id, choice));
+        }
+        print!("Select number or value: ");
+        io::stdout()
+            .flush()
+            .map_err(|err| QaLibError::Component(err.to_string()))?;
+        let mut input = String::new();
+        let read = io::stdin()
+            .read_line(&mut input)
+            .map_err(|err| QaLibError::Component(err.to_string()))?;
+        if read == 0 {
+            return Err(QaLibError::Component("stdin closed".to_string()));
+        }
+        let trimmed = input.trim();
+        if trimmed.is_empty() {
+            if required {
+                println!("value is required");
+                continue;
+            }
+            return Ok(JsonValue::Null);
+        }
+        if let Ok(n) = trimmed.parse::<usize>()
+            && n > 0
+            && n <= choices.len()
+        {
+            return Ok(JsonValue::String(choices[n - 1].clone()));
+        }
+        if choices.iter().any(|choice| choice == trimmed) {
+            return Ok(JsonValue::String(trimmed.to_string()));
+        }
+        println!("invalid choice");
+    }
+}
+
+fn prompt_list_value(
+    title: &str,
+    required: bool,
+    question: &JsonValue,
+) -> Result<JsonValue, QaLibError> {
+    let fields = question
+        .get("list")
+        .and_then(|value| value.get("fields"))
+        .and_then(JsonValue::as_array)
+        .ok_or_else(|| QaLibError::MissingField("list.fields".to_string()))?;
+
+    println!("{title}:");
+    println!("Press Enter on 'Add item?' to finish.");
+    let mut items = Vec::new();
+    loop {
+        print!("Add item #{}? [y/N]: ", items.len() + 1);
+        io::stdout()
+            .flush()
+            .map_err(|err| QaLibError::Component(err.to_string()))?;
+        let mut add = String::new();
+        let read = io::stdin()
+            .read_line(&mut add)
+            .map_err(|err| QaLibError::Component(err.to_string()))?;
+        if read == 0 {
+            return Err(QaLibError::Component("stdin closed".to_string()));
+        }
+        let add = add.trim().to_ascii_lowercase();
+        if add.is_empty() || add == "n" || add == "no" {
+            break;
+        }
+        if add != "y" && add != "yes" {
+            println!("please answer y or n");
+            continue;
+        }
+
+        let mut item = JsonMap::new();
+        for field in fields {
+            let field_id = field
+                .get("id")
+                .and_then(JsonValue::as_str)
+                .ok_or_else(|| QaLibError::MissingField("id".to_string()))?;
+            let field_title = field
+                .get("title")
+                .and_then(JsonValue::as_str)
+                .unwrap_or(field_id);
+            let field_kind = field
+                .get("type")
+                .and_then(JsonValue::as_str)
+                .unwrap_or("string");
+            let field_required = field
+                .get("required")
+                .and_then(JsonValue::as_bool)
+                .unwrap_or(false);
+            let value = match field_kind {
+                "enum" => prompt_enum_value(field_id, field_title, field_required, field)?,
+                _ => prompt_string_value(field_title, field_required)?,
+            };
+            if !value.is_null() {
+                item.insert(field_id.to_string(), value);
+            }
+        }
+        items.push(JsonValue::Object(item));
+    }
+
+    if required && items.is_empty() {
+        println!("at least one item is required");
+        return prompt_list_value(title, required, question);
+    }
+    Ok(JsonValue::Array(items))
+}
+
+fn enum_choice_label<'a>(question_id: &str, choice: &'a str) -> Cow<'a, str> {
+    match (question_id, choice) {
+        ("access_mode", "all_selected_get_all_packs") => {
+            Cow::Borrowed("All tenants and teams get access to all packs")
+        }
+        ("access_mode", "per_pack_matrix") => Cow::Borrowed("Fine-grained access control"),
+        _ => Cow::Borrowed(choice),
+    }
+}
+
+fn build_prefilled_wizard_answers_from_cli(args: &DemoWizardArgs) -> JsonValue {
+    let mut map = JsonMap::new();
+    if let Some(bundle) = args.bundle.as_ref() {
+        map.insert(
+            "bundle_path".to_string(),
+            JsonValue::String(bundle.display().to_string()),
+        );
+    }
+    if !args.pack_refs.is_empty() {
+        let values = args
+            .pack_refs
+            .iter()
+            .map(|pack_ref| json!({ "pack_ref": pack_ref }))
+            .collect::<Vec<_>>();
+        map.insert("pack_refs".to_string(), JsonValue::Array(values));
+    }
+    if !args.targets.is_empty() {
+        let values = args
+            .targets
+            .iter()
+            .filter_map(|target| parse_wizard_target(target).ok())
+            .map(|(tenant, team)| {
+                if let Some(team_id) = team {
+                    json!({ "tenant_id": tenant, "team_id": team_id })
+                } else {
+                    json!({ "tenant_id": tenant })
+                }
+            })
+            .collect::<Vec<_>>();
+        if !values.is_empty() {
+            map.insert("targets".to_string(), JsonValue::Array(values));
+        }
+    } else {
+        let mut target = JsonMap::new();
+        target.insert(
+            "tenant_id".to_string(),
+            JsonValue::String(args.tenant.clone()),
+        );
+        if let Some(team) = args.team.as_ref() {
+            target.insert("team_id".to_string(), JsonValue::String(team.clone()));
+        }
+        map.insert(
+            "targets".to_string(),
+            JsonValue::Array(vec![JsonValue::Object(target)]),
+        );
+    }
+    if args.execute {
+        map.insert(
+            "execution_mode".to_string(),
+            JsonValue::String("execute".to_string()),
+        );
+    } else if args.dry_run {
+        map.insert(
+            "execution_mode".to_string(),
+            JsonValue::String("dry_run".to_string()),
+        );
+    }
+    JsonValue::Object(map)
+}
+
+fn merge_cli_overrides_into_wizard_answers(answers: &mut WizardQaAnswers, args: &DemoWizardArgs) {
+    if let Some(bundle) = args.bundle.clone() {
+        answers.bundle = Some(bundle);
+    }
+    if !args.catalog_packs.is_empty() {
+        answers.catalog_packs.extend(
+            args.catalog_packs
+                .iter()
+                .map(|id| WizardCatalogPackAnswer::Id(id.clone())),
+        );
+    }
+    if !args.pack_refs.is_empty() {
+        answers.pack_refs.extend(
+            args.pack_refs
+                .iter()
+                .map(|pack_ref| WizardPackRefAnswer::Ref(pack_ref.clone())),
+        );
+    }
+    if !args.targets.is_empty() {
+        answers.targets = args
+            .targets
+            .iter()
+            .map(|target| WizardTargetAnswer::Target(target.clone()))
+            .collect();
+    }
+    if !args.allow_paths.is_empty() {
+        answers.allow_paths = args.allow_paths.clone();
+    }
+    if args.tenant != "demo" || answers.tenant.is_none() {
+        answers.tenant = Some(args.tenant.clone());
+    }
+    if args.team.is_some() {
+        answers.team = args.team.clone();
+    }
+    if args.locale != "en-GB" || answers.locale.is_none() {
+        answers.locale = Some(args.locale.clone());
+    }
+}
+
+fn parse_local_registry_ref(reference: &str) -> Option<PathBuf> {
+    if let Some(path) = reference.strip_prefix("file://") {
+        let trimmed = path.trim();
+        if trimmed.is_empty() {
+            return None;
+        }
+        return Some(PathBuf::from(trimmed));
+    }
+    if reference.contains("://") {
+        return None;
+    }
+    Some(PathBuf::from(reference))
+}
+
+fn normalize_pack_refs(values: &[WizardPackRefAnswer]) -> Vec<String> {
+    values
+        .iter()
+        .map(|value| match value {
+            WizardPackRefAnswer::Ref(raw) => raw.clone(),
+            WizardPackRefAnswer::Item { pack_ref, .. } => pack_ref.clone(),
+        })
+        .filter(|value| !value.trim().is_empty())
+        .collect()
+}
+
+fn normalize_default_assignments_from_pack_refs(
+    values: &[WizardPackRefAnswer],
+) -> anyhow::Result<Vec<wizard::PackDefaultSelection>> {
+    let mut out = Vec::new();
+    for value in values {
+        let WizardPackRefAnswer::Item {
+            pack_ref,
+            tenant_id,
+            team_id,
+            make_default_scope,
+        } = value
+        else {
+            continue;
+        };
+        let Some(scope_raw) = make_default_scope.as_deref().map(str::trim) else {
+            continue;
+        };
+        let scope = match scope_raw {
+            "" | "none" => continue,
+            "global" => wizard::PackScope::Global,
+            "tenant" => {
+                let tenant_id = tenant_id
+                    .clone()
+                    .filter(|value| !value.trim().is_empty())
+                    .ok_or_else(|| anyhow!("make_default_scope=tenant requires tenant_id"))?;
+                wizard::PackScope::Tenant { tenant_id }
+            }
+            "team" => {
+                let tenant_id = tenant_id
+                    .clone()
+                    .filter(|value| !value.trim().is_empty())
+                    .ok_or_else(|| anyhow!("make_default_scope=team requires tenant_id"))?;
+                let team_id = team_id
+                    .clone()
+                    .filter(|value| !value.trim().is_empty())
+                    .ok_or_else(|| anyhow!("make_default_scope=team requires team_id"))?;
+                wizard::PackScope::Team { tenant_id, team_id }
+            }
+            other => return Err(anyhow!("unsupported make_default_scope {other}")),
+        };
+        out.push(wizard::PackDefaultSelection {
+            pack_identifier: pack_ref.clone(),
+            scope,
+        });
+    }
+    Ok(out)
+}
+
+fn normalize_catalog_packs(values: &[WizardCatalogPackAnswer]) -> Vec<String> {
+    values
+        .iter()
+        .map(|value| match value {
+            WizardCatalogPackAnswer::Id(raw) => raw.clone(),
+            WizardCatalogPackAnswer::Item { id } => id.clone(),
+        })
+        .filter(|value| !value.trim().is_empty())
+        .collect()
+}
+
+fn normalize_targets(values: &[WizardTargetAnswer]) -> Vec<String> {
+    values
+        .iter()
+        .map(|value| match value {
+            WizardTargetAnswer::Target(raw) => raw.clone(),
+            WizardTargetAnswer::Item { tenant_id, team_id } => team_id
+                .as_ref()
+                .map(|team| format!("{tenant_id}:{team}"))
+                .unwrap_or_else(|| tenant_id.clone()),
+        })
+        .filter(|value| !value.trim().is_empty())
+        .collect()
+}
+
+fn normalize_target_selections(values: &[WizardTargetAnswer]) -> Vec<wizard::TenantSelection> {
+    values
+        .iter()
+        .filter_map(|value| match value {
+            WizardTargetAnswer::Target(raw) => {
+                parse_wizard_target(raw)
+                    .ok()
+                    .map(|(tenant, team)| wizard::TenantSelection {
+                        tenant,
+                        team,
+                        allow_paths: Vec::new(),
+                    })
+            }
+            WizardTargetAnswer::Item { tenant_id, team_id } => {
+                let tenant = tenant_id.trim();
+                if tenant.is_empty() {
+                    None
+                } else {
+                    Some(wizard::TenantSelection {
+                        tenant: tenant.to_string(),
+                        team: team_id.clone().filter(|value| !value.trim().is_empty()),
+                        allow_paths: Vec::new(),
+                    })
+                }
+            }
+        })
+        .collect()
+}
+
+fn normalize_provider_ids(values: &[WizardProviderAnswer]) -> Vec<String> {
+    values
+        .iter()
+        .filter_map(|value| match value {
+            WizardProviderAnswer::Id(raw) => Some(raw.clone()),
+            WizardProviderAnswer::Item { provider_id, id } => provider_id
+                .clone()
+                .or_else(|| id.clone())
+                .filter(|value| !value.trim().is_empty()),
+        })
+        .collect()
+}
+
+fn normalize_update_ops(values: &[WizardUpdateOpAnswer]) -> BTreeSet<wizard::WizardUpdateOp> {
+    values
+        .iter()
+        .filter_map(|value| match value {
+            WizardUpdateOpAnswer::Op(raw) => raw.trim().parse::<wizard::WizardUpdateOp>().ok(),
+            WizardUpdateOpAnswer::Item { op } => op.trim().parse::<wizard::WizardUpdateOp>().ok(),
+        })
+        .collect()
+}
+
+fn normalize_remove_targets(
+    values: &[WizardRemoveTargetAnswer],
+) -> BTreeSet<wizard::WizardRemoveTarget> {
+    values
+        .iter()
+        .filter_map(|value| match value {
+            WizardRemoveTargetAnswer::Target(raw) => {
+                raw.trim().parse::<wizard::WizardRemoveTarget>().ok()
+            }
+            WizardRemoveTargetAnswer::Item {
+                target_type,
+                target,
+            } => target_type
+                .as_ref()
+                .or(target.as_ref())
+                .and_then(|raw| raw.trim().parse::<wizard::WizardRemoveTarget>().ok()),
+        })
+        .collect()
+}
+
+fn normalize_pack_removes(
+    values: &[WizardPackRemoveAnswer],
+) -> anyhow::Result<Vec<wizard::PackRemoveSelection>> {
+    let mut out = Vec::new();
+    for value in values {
+        match value {
+            WizardPackRemoveAnswer::Pack(raw) => {
+                let pack_identifier = raw.trim().to_string();
+                if pack_identifier.is_empty() {
+                    continue;
+                }
+                out.push(wizard::PackRemoveSelection {
+                    pack_identifier,
+                    scope: None,
+                });
+            }
+            WizardPackRemoveAnswer::Item {
+                pack_identifier,
+                pack_id,
+                pack_ref,
+                scope,
+                tenant_id,
+                team_id,
+            } => {
+                let identifier = pack_identifier
+                    .clone()
+                    .or_else(|| pack_id.clone())
+                    .or_else(|| pack_ref.clone())
+                    .unwrap_or_default();
+                let pack_identifier = identifier.trim().to_string();
+                if pack_identifier.is_empty() {
+                    continue;
+                }
+                let parsed_scope = match scope.as_deref().map(str::trim).filter(|v| !v.is_empty()) {
+                    None => None,
+                    Some("bundle") => Some(wizard::PackScope::Bundle),
+                    Some("global") => Some(wizard::PackScope::Global),
+                    Some("tenant") => {
+                        let tenant_id = tenant_id
+                            .clone()
+                            .filter(|value| !value.trim().is_empty())
+                            .ok_or_else(|| {
+                                anyhow!("packs_remove scope=tenant requires tenant_id")
+                            })?;
+                        Some(wizard::PackScope::Tenant { tenant_id })
+                    }
+                    Some("team") => {
+                        let tenant_id = tenant_id
+                            .clone()
+                            .filter(|value| !value.trim().is_empty())
+                            .ok_or_else(|| anyhow!("packs_remove scope=team requires tenant_id"))?;
+                        let team_id = team_id
+                            .clone()
+                            .filter(|value| !value.trim().is_empty())
+                            .ok_or_else(|| anyhow!("packs_remove scope=team requires team_id"))?;
+                        Some(wizard::PackScope::Team { tenant_id, team_id })
+                    }
+                    Some(other) => return Err(anyhow!("unsupported packs_remove scope {other}")),
+                };
+                out.push(wizard::PackRemoveSelection {
+                    pack_identifier,
+                    scope: parsed_scope,
+                });
+            }
+        }
+    }
+    Ok(out)
+}
+
+fn normalize_access_changes(
+    values: &[WizardAccessChangeAnswer],
+) -> Vec<wizard::AccessChangeSelection> {
+    values
+        .iter()
+        .filter_map(|value| match value {
+            WizardAccessChangeAnswer::Item {
+                pack_id,
+                pack_ref,
+                operation,
+                tenant_id,
+                team_id,
+            } => {
+                let pack_id = pack_id
+                    .clone()
+                    .or_else(|| pack_ref.clone())
+                    .filter(|value| !value.trim().is_empty())?;
+                let operation = match operation.as_deref().map(str::trim).unwrap_or("allow_add") {
+                    "allow_add" => wizard::AccessOperation::AllowAdd,
+                    "allow_remove" => wizard::AccessOperation::AllowRemove,
+                    _ => wizard::AccessOperation::AllowAdd,
+                };
+                Some(wizard::AccessChangeSelection {
+                    pack_id,
+                    operation,
+                    tenant_id: tenant_id.clone(),
+                    team_id: team_id.clone(),
+                })
+            }
+        })
+        .collect()
+}
+
+fn build_access_changes(
+    mode: wizard::WizardMode,
+    access_mode: Option<&str>,
+    tenants: &[wizard::TenantSelection],
+    pack_refs: &[String],
+    existing: Vec<wizard::AccessChangeSelection>,
+) -> anyhow::Result<Vec<wizard::AccessChangeSelection>> {
+    if mode != wizard::WizardMode::Create {
+        return Ok(existing);
+    }
+
+    let normalized_mode = access_mode.map(str::trim).filter(|value| !value.is_empty());
+    let mut changes = existing;
+    match normalized_mode {
+        Some("all_selected_get_all_packs") => {
+            for tenant in tenants {
+                for pack_ref in pack_refs {
+                    changes.push(wizard::AccessChangeSelection {
+                        pack_id: pack_ref.clone(),
+                        operation: wizard::AccessOperation::AllowAdd,
+                        tenant_id: tenant.tenant.clone(),
+                        team_id: tenant.team.clone(),
+                    });
+                }
+            }
+        }
+        Some("per_pack_matrix") => {
+            if changes.is_empty() {
+                return Err(anyhow!(
+                    "access_mode=per_pack_matrix requires non-empty access_change entries"
+                ));
+            }
+        }
+        Some(other) => {
+            return Err(anyhow!(
+                "unsupported access_mode {}; expected all_selected_get_all_packs or per_pack_matrix",
+                other
+            ));
+        }
+        None => {
+            if changes.is_empty() {
+                for tenant in tenants {
+                    for pack_ref in pack_refs {
+                        changes.push(wizard::AccessChangeSelection {
+                            pack_id: pack_ref.clone(),
+                            operation: wizard::AccessOperation::AllowAdd,
+                            tenant_id: tenant.tenant.clone(),
+                            team_id: tenant.team.clone(),
+                        });
+                    }
+                }
+            }
+        }
+    }
+
+    let mut dedup = BTreeSet::new();
+    changes.retain(|change| {
+        let key = (
+            change.pack_id.clone(),
+            match change.operation {
+                wizard::AccessOperation::AllowAdd => "allow_add",
+                wizard::AccessOperation::AllowRemove => "allow_remove",
+            }
+            .to_string(),
+            change.tenant_id.clone(),
+            change.team_id.clone().unwrap_or_default(),
+        );
+        dedup.insert(key)
+    });
+    Ok(changes)
+}
+
+fn load_wizard_i18n(locale: &str) -> anyhow::Result<ResolvedI18nMap> {
+    let requested = PathBuf::from("i18n")
+        .join("operator_wizard")
+        .join(format!("{locale}.json"));
+    let fallback = PathBuf::from("i18n")
+        .join("operator_wizard")
+        .join("en-GB.json");
+    let path = if requested.exists() {
+        requested
+    } else if fallback.exists() {
+        fallback
+    } else {
+        return Ok(ResolvedI18nMap::new());
+    };
+    let raw = std::fs::read_to_string(&path)
+        .with_context(|| format!("read wizard i18n map {}", path.display()))?;
+    serde_json::from_str(&raw).with_context(|| format!("parse wizard i18n map {}", path.display()))
 }
 
 fn run_wizard_setup_for_target(
@@ -5961,5 +7070,45 @@ mod tests {
         let single = select_demo_providers(&providers, Some("messaging-slack")).unwrap();
         assert_eq!(single.len(), 1);
         assert_eq!(single[0].pack.pack_id, "messaging-slack");
+    }
+
+    #[test]
+    fn create_per_pack_matrix_requires_entries() {
+        let tenants = vec![wizard::TenantSelection {
+            tenant: "demo".to_string(),
+            team: Some("default".to_string()),
+            allow_paths: Vec::new(),
+        }];
+        let err = build_access_changes(
+            wizard::WizardMode::Create,
+            Some("per_pack_matrix"),
+            &tenants,
+            &["oci://ghcr.io/greentic/packs/sales@0.6.0".to_string()],
+            Vec::new(),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("requires non-empty access_change"));
+    }
+
+    #[test]
+    fn create_all_selected_expands_matrix() {
+        let tenants = vec![wizard::TenantSelection {
+            tenant: "demo".to_string(),
+            team: Some("default".to_string()),
+            allow_paths: Vec::new(),
+        }];
+        let changes = build_access_changes(
+            wizard::WizardMode::Create,
+            Some("all_selected_get_all_packs"),
+            &tenants,
+            &[
+                "oci://ghcr.io/greentic/packs/sales@0.6.0".to_string(),
+                "oci://ghcr.io/greentic/packs/hr@0.6.0".to_string(),
+            ],
+            Vec::new(),
+        )
+        .unwrap();
+        assert_eq!(changes.len(), 2);
     }
 }

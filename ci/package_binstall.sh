@@ -45,11 +45,11 @@ if [[ "$TARGET" != "$HOST_TARGET" ]]; then
   if [[ "${USE_CROSS:-0}" == "1" ]] && command -v cross >/dev/null 2>&1; then
     cross build --release --target "$TARGET"
   else
-    cargo build --release --target "$TARGET"
+    cargo build --locked --release --target "$TARGET"
   fi
   BIN_DIR="target/$TARGET/release"
 else
-  cargo build --release
+  cargo build --locked --release
   BIN_DIR="target/release"
 fi
 

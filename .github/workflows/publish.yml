@@ -70,7 +70,7 @@ jobs:
         with:
           tool: cargo-binstall@1.6.2
       - name: Install Greentic CLIs
-        run: cargo binstall -y greentic-pack
+        run: cargo binstall -y --locked --version 0.4 greentic-pack
       - name: Format
         run: cargo fmt --check
 
@@ -95,9 +95,9 @@ jobs:
         with:
           tool: cargo-binstall@1.6.2
       - name: Install Greentic CLIs
-        run: cargo binstall -y greentic-pack
+        run: cargo binstall -y --locked --version 0.4 greentic-pack
       - name: Clippy
-        run: cargo clippy -- -D warnings
+        run: cargo clippy --locked -- -D warnings
 
   test:
     runs-on: ubuntu-latest
@@ -120,9 +120,9 @@ jobs:
         with:
           tool: cargo-binstall@1.6.2
       - name: Install Greentic CLIs
-        run: cargo binstall -y greentic-pack
+        run: cargo binstall -y --locked --version 0.4 greentic-pack
       - name: Test
-        run: cargo test
+        run: cargo test --locked
 
   publish-crates:
     runs-on: ubuntu-latest
@@ -145,7 +145,7 @@ jobs:
         with:
           tool: cargo-binstall@1.6.2
       - name: Install Greentic CLIs
-        run: cargo binstall -y greentic-pack
+        run: cargo binstall -y --locked --version 0.4 greentic-pack
       - name: Prepare publish workspace
         id: prep
         run: |
@@ -206,7 +206,7 @@ jobs:
         with:
           tool: cargo-binstall@1.6.2
       - name: Install Greentic CLIs
-        run: cargo binstall -y greentic-pack
+        run: cargo binstall -y --locked --version 0.4 greentic-pack
       - name: Build and package
         run: |
           mkdir -p dist

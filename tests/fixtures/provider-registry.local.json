@@ -1,0 +1,21 @@
+{
+  "registry_version": "providers@1",
+  "items": [
+    {
+      "id": "messaging-telegram",
+      "label": {
+        "i18n_key": "provider.messaging.telegram",
+        "fallback": "Telegram"
+      },
+      "ref": "repo://messaging/providers/messaging-telegram@latest"
+    },
+    {
+      "id": "messaging-slack",
+      "label": {
+        "i18n_key": "provider.messaging.slack",
+        "fallback": "Slack"
+      },
+      "ref": "repo://messaging/providers/messaging-slack@latest"
+    }
+  ]
+}
