@@ -10,7 +10,6 @@ use serde_json::Value;
 
 use crate::bin_resolver::{self, ResolveCtx};
 use crate::config::{DemoConfig, DemoProviderConfig};
-use crate::dev_mode::DevSettingsResolved;
 use crate::domains::Domain;
 use crate::operator_log;
 use crate::runner_integration;
@@ -36,7 +35,6 @@ pub struct ProviderSetupOptions {
 pub fn run_provider_setup(
     config_dir: &Path,
     config: &DemoConfig,
-    dev_settings: Option<DevSettingsResolved>,
     public_base_url: Option<&str>,
     options: ProviderSetupOptions,
 ) -> anyhow::Result<()> {
@@ -45,7 +43,7 @@ pub fn run_provider_setup(
         return Ok(());
     }
 
-    let runner = resolve_runner_binary(config_dir, dev_settings.as_ref(), options.runner_binary)?;
+    let runner = resolve_runner_binary(config_dir, options.runner_binary)?;
     let env = resolve_env(None);
     let secrets_setup = if options.skip_secrets_init {
         None
@@ -268,11 +266,7 @@ fn resolve_providers(
     selected
 }
 
-fn resolve_runner_binary(
-    config_dir: &Path,
-    dev_settings: Option<&DevSettingsResolved>,
-    explicit: Option<PathBuf>,
-) -> anyhow::Result<PathBuf> {
+fn resolve_runner_binary(config_dir: &Path, explicit: Option<PathBuf>) -> anyhow::Result<PathBuf> {
     let explicit = explicit.map(|path| {
         if path.is_absolute() {
             path
@@ -284,7 +278,6 @@ fn resolve_runner_binary(
         "greentic-runner",
         &ResolveCtx {
             config_dir: config_dir.to_path_buf(),
-            dev: dev_settings.cloned(),
             explicit_path: explicit,
         },
     )

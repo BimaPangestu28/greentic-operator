@@ -1,0 +1,38 @@
+{
+  "bundle": "../test/wiz-test",
+  "bundle_name": "wiz tst",
+  "catalog_packs": [],
+  "pack_refs": [
+    {
+      "pack_ref": "./test",
+      "access_scope": "all_tenants",
+      "make_default_pack": "no",
+      "tenant_id": null,
+      "team_id": null
+    }
+  ],
+  "tenant": "demo",
+  "team": null,
+  "targets": [
+    {
+      "tenant_id": "demo",
+      "team_id": null
+    }
+  ],
+  "allow_paths": [],
+  "providers": [
+    {
+      "provider_id": "messaging-telegram",
+      "id": null
+    }
+  ],
+  "update_ops": [],
+  "packs_remove": [],
+  "providers_remove": [],
+  "tenants_remove": [],
+  "access_change": [],
+  "access_mode": null,
+  "remove_targets": [],
+  "locale": "nl-BE",
+  "execution_mode": "dry run"
+}

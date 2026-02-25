@@ -1,0 +1,16 @@
+{
+  "wizard.create.bundle_path": "Bundle output path",
+  "wizard.create.bundle_name": "Bundle name",
+  "wizard.create.locale": "Locale",
+  "wizard.create.pack_refs": "Pack references",
+  "wizard.create.providers": "Providers",
+  "wizard.create.targets": "Tenants and teams",
+  "wizard.create.access_mode": "Access mode",
+  "wizard.create.execution_mode": "Execution mode",
+  "wizard.update.bundle_path": "Bundle path",
+  "wizard.update.ops": "Update operations",
+  "wizard.update.execution_mode": "Execution mode",
+  "wizard.remove.bundle_path": "Bundle path",
+  "wizard.remove.targets": "Remove targets",
+  "wizard.remove.execution_mode": "Execution mode"
+}

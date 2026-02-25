@@ -125,7 +125,7 @@ fn provider_setup_seeds_and_resolves_secret() -> Result<()> {
         continue_on_error: false,
     };
 
-    run_provider_setup(&bundle_root, &config, None, None, options)?;
+    run_provider_setup(&bundle_root, &config, None, options)?;
 
     let store_path = dev_store_path::ensure_path(&bundle_root)?;
     assert!(store_path.exists());

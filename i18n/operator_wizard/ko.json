@@ -1,0 +1,16 @@
+{
+  "wizard.create.bundle_path": "번들 출력 경로",
+  "wizard.create.bundle_name": "번들 이름",
+  "wizard.create.locale": "로케일",
+  "wizard.create.pack_refs": "팩 참조",
+  "wizard.create.providers": "프로바이더",
+  "wizard.create.targets": "테넌트 및 팀",
+  "wizard.create.access_mode": "접근 모드",
+  "wizard.create.execution_mode": "실행 모드",
+  "wizard.update.bundle_path": "번들 경로",
+  "wizard.update.ops": "업데이트 작업",
+  "wizard.update.execution_mode": "실행 모드",
+  "wizard.remove.bundle_path": "번들 경로",
+  "wizard.remove.targets": "제거 대상",
+  "wizard.remove.execution_mode": "실행 모드"
+}

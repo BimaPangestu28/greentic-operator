@@ -1,0 +1,16 @@
+{
+  "wizard.create.bundle_path": "バンドル出力パス",
+  "wizard.create.bundle_name": "バンドル名",
+  "wizard.create.locale": "ロケール",
+  "wizard.create.pack_refs": "パック参照",
+  "wizard.create.providers": "プロバイダー",
+  "wizard.create.targets": "テナントとチーム",
+  "wizard.create.access_mode": "アクセスモード",
+  "wizard.create.execution_mode": "実行モード",
+  "wizard.update.bundle_path": "バンドルパス",
+  "wizard.update.ops": "更新操作",
+  "wizard.update.execution_mode": "実行モード",
+  "wizard.remove.bundle_path": "バンドルパス",
+  "wizard.remove.targets": "削除対象",
+  "wizard.remove.execution_mode": "実行モード"
+}

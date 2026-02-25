@@ -5,6 +5,7 @@ For THIS REPOSITORY, you must ALWAYS:
 1. Maintain `.codex/repo_overview.md` using the “Repo Overview Maintenance” routine BEFORE starting any new PR and AFTER finishing it.
 2. Run `ci/local_check.sh` at the end of your work and ensure it passes, or explain precisely why it cannot be made to pass as part of this PR.
 3. Prefer using existing Greentic repos/crates (interfaces, types, secrets, oauth, messaging, events, etc.) instead of reinventing types, interfaces, or behaviour locally.
+4. Keep all translation catalogs up to date whenever user-facing CLI or wizard text changes (and ensure newly added locales are included in the embedded i18n assets).
 
 Treat these as built-in prerequisites and finalisation steps for ALL work in this repo.
 

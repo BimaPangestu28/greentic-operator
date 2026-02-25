@@ -41,14 +41,7 @@ fn provider_setup_writes_outputs() {
         continue_on_error: true,
     };
 
-    run_provider_setup(
-        config_dir,
-        &config,
-        None,
-        Some("https://example.test"),
-        options,
-    )
-    .unwrap();
+    run_provider_setup(config_dir, &config, Some("https://example.test"), options).unwrap();
 
     let providers_root = config_dir
         .join("state")

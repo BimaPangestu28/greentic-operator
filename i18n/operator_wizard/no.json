@@ -1,0 +1,16 @@
+{
+  "wizard.create.bundle_path": "Ausgabepfad des Bundles",
+  "wizard.create.bundle_name": "Bundle-Name",
+  "wizard.create.locale": "Sprache",
+  "wizard.create.pack_refs": "Pack-Referenzen",
+  "wizard.create.providers": "Anbieter",
+  "wizard.create.targets": "Mandanten und Teams",
+  "wizard.create.access_mode": "Zugriffsmodus",
+  "wizard.create.execution_mode": "Ausführungsmodus",
+  "wizard.update.bundle_path": "Bundle-Pfad",
+  "wizard.update.ops": "Aktualisierungsvorgänge",
+  "wizard.update.execution_mode": "Ausführungsmodus",
+  "wizard.remove.bundle_path": "Bundle-Pfad",
+  "wizard.remove.targets": "Zu entfernende Ziele",
+  "wizard.remove.execution_mode": "Ausführungsmodus"
+}

@@ -688,9 +688,9 @@ dependencies = [
 
 [[package]]
 name = "component-qa"
-version = "0.4.4"
+version = "0.4.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4a373eb9fa672fc0bd18de861b7d74cc4ba23a2000934f89e9ba972cc3aa72a1"
+checksum = "48b8862c31b3be023a33ee860be940d9eb07206ef33db05cc0f98575a38ff02f"
 dependencies = [
  "qa-spec",
  "serde",
@@ -1802,6 +1802,7 @@ dependencies = [
  "clap",
  "directories-next",
  "greentic-distributor-client",
+ "greentic-i18n",
  "greentic-interfaces",
  "greentic-interfaces-guest",
  "greentic-interfaces-host",
@@ -1814,6 +1815,7 @@ dependencies = [
  "http-body-util",
  "hyper",
  "hyper-util",
+ "include_dir",
  "indexmap 2.13.0",
  "jsonschema",
  "libc",
@@ -1869,9 +1871,9 @@ dependencies = [
 
 [[package]]
 name = "greentic-qa-lib"
-version = "0.4.4"
+version = "0.4.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0215bb845c3c2a00590535a512ac37bb1fbb0716f0f6f2e6a186439ef63c33fe"
+checksum = "25a87e014208a9a3008079382947aef806e4baa238c55e8b9bc1e783966ce6a1"
 dependencies = [
  "component-qa",
  "qa-spec",
@@ -2569,6 +2571,25 @@ dependencies = [
  "sized-chunks",
  "typenum",
  "version_check",
+]
+
+[[package]]
+name = "include_dir"
+version = "0.7.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "923d117408f1e49d914f1a379a309cffe4f18c05cf4e3d12e613a15fc81bd0dd"
+dependencies = [
+ "include_dir_macros",
+]
+
+[[package]]
+name = "include_dir_macros"
+version = "0.7.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7cab85a7ed0bd5f0e76d93846e0147172bed2e2d3f859bcc33a8d9699cad1a75"
+dependencies = [
+ "proc-macro2",
+ "quote",
 ]
 
 [[package]]
@@ -3521,9 +3542,9 @@ dependencies = [
 
 [[package]]
 name = "qa-spec"
-version = "0.4.4"
+version = "0.4.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7bc1de586dcb25ebb6040200047065b982d94b739dfc3358cea9adc5ac7d2301"
+checksum = "aa7772b29846d36ddc4861a73793ae901256bf3c3b90632ce46297509a1d86fa"
 dependencies = [
  "globset",
  "handlebars",

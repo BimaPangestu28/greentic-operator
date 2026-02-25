@@ -1,0 +1,16 @@
+{
+  "wizard.create.bundle_path": "Bundle 输出路径",
+  "wizard.create.bundle_name": "Bundle 名称",
+  "wizard.create.locale": "语言",
+  "wizard.create.pack_refs": "Pack 引用",
+  "wizard.create.providers": "提供方",
+  "wizard.create.targets": "租户和团队",
+  "wizard.create.access_mode": "访问模式",
+  "wizard.create.execution_mode": "执行模式",
+  "wizard.update.bundle_path": "Bundle 路径",
+  "wizard.update.ops": "更新操作",
+  "wizard.update.execution_mode": "执行模式",
+  "wizard.remove.bundle_path": "Bundle 路径",
+  "wizard.remove.targets": "移除目标",
+  "wizard.remove.execution_mode": "执行模式"
+}

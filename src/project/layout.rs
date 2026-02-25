@@ -5,13 +5,7 @@ use super::{ensure_dir, write_if_missing};
 const DEFAULT_GMAP: &str = "_ = forbidden\n";
 const GREENTIC_YAML: &str = "\
 # greentic operator project
-# Optional binary overrides and dev-mode wiring
-dev:
-  mode: auto
-  root: null
-  profile: debug
-  target_dir: null
-  repo_map: {}
+# Optional binary overrides
 binaries: {}
 ";
 

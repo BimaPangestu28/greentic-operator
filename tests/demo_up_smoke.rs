@@ -50,7 +50,6 @@ services:
         &config_path,
         &config,
         None,
-        None,
         &BTreeSet::new(),
         greentic_operator::providers::ProviderSetupOptions {
             providers: None,

@@ -1,10 +1,7 @@
 use std::path::{Path, PathBuf};
 
-use crate::dev_mode::{DevProfile, DevSettingsResolved, profile_dir};
-
 pub struct ResolveCtx {
     pub config_dir: PathBuf,
-    pub dev: Option<DevSettingsResolved>,
     pub explicit_path: Option<PathBuf>,
 }
 
@@ -20,49 +17,17 @@ pub fn resolve_binary(name: &str, ctx: &ResolveCtx) -> anyhow::Result<PathBuf> {
         ));
     }
 
-    let mut tried = Vec::new();
-
-    if let Some(dev) = ctx.dev.as_ref()
-        && let Some(repo) = dev.repo_map.get(name).cloned()
-    {
-        if !dev.root.exists() {
-            return Err(anyhow::anyhow!(
-                "dev root not found: {}",
-                dev.root.display()
-            ));
+    if let Some(env_path) = env_binary_override(name) {
+        if env_path.exists() {
+            return Ok(env_path);
         }
-        let base_repo = dev.root.join(&repo);
-        let target_base = dev
-            .target_dir
-            .clone()
-            .unwrap_or_else(|| base_repo.join("target"));
-
-        let candidate = target_base
-            .join(profile_dir(dev.profile))
-            .join(binary_name(name));
-        if candidate.exists() {
-            return Ok(candidate);
-        }
-        tried.push(candidate);
-
-        if dev.profile == DevProfile::Debug {
-            let fallback = target_base.join("release").join(binary_name(name));
-            if fallback.exists() {
-                return Ok(fallback);
-            }
-            tried.push(fallback);
-        }
-
-        let mut message = format!("dev binary not found: {name}");
-        message.push_str("\nTried:");
-        for path in &tried {
-            message.push_str(&format!("\n  - {}", path.display()));
-        }
-        message.push_str(&format!(
-            "\nSuggestions:\n  - cargo build -p {repo}\n  - update dev.repo_map for {name}\n  - set binaries.{name} in greentic.yaml"
+        return Err(anyhow::anyhow!(
+            "binary override from environment not found: {}",
+            env_path.display()
         ));
-        return Err(anyhow::anyhow!(message));
     }
+
+    let mut tried = Vec::new();
 
     let local_candidates = vec![
         ctx.config_dir.join("bin").join(binary_name(name)),
@@ -93,24 +58,11 @@ pub fn resolve_binary(name: &str, ctx: &ResolveCtx) -> anyhow::Result<PathBuf> {
             message.push_str(&format!("\n  - {}", path.display()));
         }
     }
-    if let Some(dev) = ctx.dev.as_ref() {
-        let repo = dev
-            .repo_map
-            .get(name)
-            .cloned()
-            .unwrap_or_else(|| infer_repo(name));
-        message.push_str(&format!(
-            "\nSuggestions:\n  - cargo build -p {repo}\n  - set dev.repo_map for {name}\n  - set binaries.{name} in greentic.yaml"
-        ));
-    }
+    message.push_str(&format!(
+        "\nSuggestions:\n  - set binaries.{name} in greentic.yaml\n  - set GREENTIC_OPERATOR_BINARY_{}",
+        normalize_env_key(name)
+    ));
     Err(anyhow::anyhow!(message))
-}
-
-fn infer_repo(name: &str) -> String {
-    if name.starts_with("greentic-") {
-        return name.to_string();
-    }
-    name.to_string()
 }
 
 fn resolve_relative(base: &Path, path: &Path) -> PathBuf {
@@ -142,4 +94,21 @@ fn find_on_path(binary: &str) -> Option<PathBuf> {
         }
     }
     None
+}
+
+fn env_binary_override(name: &str) -> Option<PathBuf> {
+    let key = format!("GREENTIC_OPERATOR_BINARY_{}", normalize_env_key(name));
+    std::env::var_os(key).map(PathBuf::from)
+}
+
+fn normalize_env_key(name: &str) -> String {
+    name.chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() {
+                ch.to_ascii_uppercase()
+            } else {
+                '_'
+            }
+        })
+        .collect::<String>()
 }

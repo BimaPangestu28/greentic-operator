@@ -9,6 +9,7 @@ use crate::demo::ingress_types::{
 };
 use crate::demo::runner_host::{DemoRunnerHost, OperatorContext};
 use crate::domains::Domain;
+use crate::hooks::runner::apply_post_ingress_hooks_dispatch;
 use crate::operator_log;
 
 pub fn dispatch_http_ingress(
@@ -32,7 +33,16 @@ pub fn dispatch_http_ingress(
     }
 
     let value = outcome.output.unwrap_or_else(|| json!({}));
-    parse_dispatch_result(&value).with_context(|| "decode ingest_http output")
+    let mut decoded = parse_dispatch_result(&value).with_context(|| "decode ingest_http output")?;
+    apply_post_ingress_hooks_dispatch(
+        runner_host.bundle_root(),
+        runner_host,
+        domain,
+        request,
+        &mut decoded,
+        ctx,
+    )?;
+    Ok(decoded)
 }
 
 fn parse_dispatch_result(value: &JsonValue) -> anyhow::Result<IngressDispatchResult> {

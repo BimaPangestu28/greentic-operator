@@ -16,6 +16,7 @@ use crate::demo::{
     runner::DemoRunner,
     types::{DemoBlockedOn, UserEvent},
 };
+use crate::operator_i18n;
 
 #[derive(Debug)]
 struct DemoReplQuit;
@@ -77,9 +78,22 @@ impl DemoRepl {
                         self.history.push(snapshot);
                         self.last_output = Some(output.clone());
                         if let Some(reason) = reason {
-                            println!("Waiting for input: {reason}");
+                            println!(
+                                "{}",
+                                operator_i18n::trf(
+                                    "demo.repl.waiting_for_input",
+                                    "Waiting for input: {}",
+                                    &[&reason]
+                                )
+                            );
                         } else {
-                            println!("Flow is waiting for input (no adaptive card detected).");
+                            println!(
+                                "{}",
+                                operator_i18n::tr(
+                                    "demo.repl.waiting_no_card",
+                                    "Flow is waiting for input (no adaptive card detected)."
+                                )
+                            );
                         }
                         match self.command_loop() {
                             Ok(_) => {}
@@ -94,7 +108,13 @@ impl DemoRepl {
                 }
                 DemoBlockedOn::Finished(output) => {
                     let output = humanize_output(&output);
-                    println!("Flow finished with output:");
+                    println!(
+                        "{}",
+                        operator_i18n::tr(
+                            "demo.repl.finished_with_output",
+                            "Flow finished with output:"
+                        )
+                    );
                     println!(
                         "{}",
                         serde_json::to_string_pretty(&output)
@@ -131,10 +151,22 @@ impl DemoRepl {
                         self.pending_inputs = snapshot.pending_inputs.clone();
                         self.last_output = Some(snapshot.output.clone());
                         self.current_card = snapshot.card.clone();
-                        println!("Restored previous blocked state.");
+                        println!(
+                            "{}",
+                            operator_i18n::tr(
+                                "demo.repl.restored_previous_state",
+                                "Restored previous blocked state."
+                            )
+                        );
                         self.display_card_summary();
                     } else {
-                        println!("Already at the earliest blocked state.");
+                        println!(
+                            "{}",
+                            operator_i18n::tr(
+                                "demo.repl.already_earliest_state",
+                                "Already at the earliest blocked state."
+                            )
+                        );
                     }
                 }
                 Ok(DemoCommand::Help) => {
@@ -148,21 +180,32 @@ impl DemoRepl {
                         && !card.inputs.iter().any(|input| input.id == field)
                     {
                         println!(
-                            "Unknown input '{field}'. Available inputs: {}",
-                            self.list_input_ids(card)
+                            "{}",
+                            operator_i18n::trf(
+                                "demo.repl.unknown_input",
+                                "Unknown input '{}'. Available inputs: {}",
+                                &[&field, &self.list_input_ids(card)]
+                            )
                         );
                         continue;
                     }
                     self.pending_inputs.insert(field.clone(), value.clone());
-                    println!("Set {field}={value}");
+                    println!(
+                        "{}",
+                        operator_i18n::trf("demo.repl.set_input", "Set {}={}", &[&field, &value])
+                    );
                 }
                 Ok(DemoCommand::Click { action_id }) => {
                     if let Some(card) = &self.current_card
                         && !card.actions.iter().any(|action| action.id == action_id)
                     {
                         println!(
-                            "Unknown action '{action_id}'. Available actions: {}",
-                            self.list_action_ids(card)
+                            "{}",
+                            operator_i18n::trf(
+                                "demo.repl.unknown_action",
+                                "Unknown action '{}'. Available actions: {}",
+                                &[&action_id, &self.list_action_ids(card)]
+                            )
                         );
                         continue;
                     }
@@ -177,7 +220,13 @@ impl DemoRepl {
                     break;
                 }
                 Err(CommandParseError::Unknown(_)) => {
-                    println!("Unknown command. See @help.");
+                    println!(
+                        "{}",
+                        operator_i18n::tr(
+                            "demo.repl.unknown_command",
+                            "Unknown command. See @help."
+                        )
+                    );
                     print_help();
                 }
                 Err(err) => {
@@ -194,7 +243,10 @@ impl DemoRepl {
             print_card_summary(card);
             return;
         }
-        println!("No adaptive card to show.");
+        println!(
+            "{}",
+            operator_i18n::tr("demo.repl.no_card", "No adaptive card to show.")
+        );
     }
 
     fn print_json(&self) {
@@ -205,7 +257,10 @@ impl DemoRepl {
                 println!("{}", last_output);
             }
         } else {
-            println!("No output available.");
+            println!(
+                "{}",
+                operator_i18n::tr("demo.repl.no_output", "No output available.")
+            );
         }
     }
 

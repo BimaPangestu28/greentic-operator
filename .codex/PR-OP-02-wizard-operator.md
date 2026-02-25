@@ -507,7 +507,7 @@ Use a stable derived `pack_id`, persisted during create/add and reused for updat
 Rules:
 - Local file/path: `pack_id = slug(pack_basename_without_ext)`.
 - `oci|store|repo` refs: derive from last path segment + optional version tag (sanitized).
-  - `oci://ghcr.io/greentic/packs/sales@0.6.0` -> `sales-0_6_0`
+  - `oci://ghcr.io/greenticai/packs/sales@0.6.0` -> `sales-0_6_0`
   - `store://sales/lead-to-cash@latest` -> `lead-to-cash-latest`
 - On collision: append `-2`, `-3`, etc.
 

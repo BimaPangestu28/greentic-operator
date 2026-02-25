@@ -1,0 +1,16 @@
+{
+  "wizard.create.bundle_path": "बंडल आउटपुट पथ",
+  "wizard.create.bundle_name": "बंडल नाम",
+  "wizard.create.locale": "लोकेल",
+  "wizard.create.pack_refs": "पैक संदर्भ",
+  "wizard.create.providers": "प्रदाता",
+  "wizard.create.targets": "टेनेंट और टीमें",
+  "wizard.create.access_mode": "एक्सेस मोड",
+  "wizard.create.execution_mode": "निष्पादन मोड",
+  "wizard.update.bundle_path": "बंडल पथ",
+  "wizard.update.ops": "अपडेट ऑपरेशन",
+  "wizard.update.execution_mode": "निष्पादन मोड",
+  "wizard.remove.bundle_path": "बंडल पथ",
+  "wizard.remove.targets": "हटाने के लक्ष्य",
+  "wizard.remove.execution_mode": "निष्पादन मोड"
+}

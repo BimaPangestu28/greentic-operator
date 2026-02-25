@@ -1,0 +1,16 @@
+{
+  "wizard.create.bundle_path": "Chemin de sortie du bundle",
+  "wizard.create.bundle_name": "Nom du bundle",
+  "wizard.create.locale": "Langue",
+  "wizard.create.pack_refs": "Références de pack",
+  "wizard.create.providers": "Fournisseurs",
+  "wizard.create.targets": "Locataires et équipes",
+  "wizard.create.access_mode": "Mode d'accès",
+  "wizard.create.execution_mode": "Mode d'exécution",
+  "wizard.update.bundle_path": "Chemin du bundle",
+  "wizard.update.ops": "Opérations de mise à jour",
+  "wizard.update.execution_mode": "Mode d'exécution",
+  "wizard.remove.bundle_path": "Chemin du bundle",
+  "wizard.remove.targets": "Cibles à supprimer",
+  "wizard.remove.execution_mode": "Mode d'exécution"
+}

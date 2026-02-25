@@ -11,7 +11,7 @@ use std::{
 
 use anyhow::{Context, anyhow};
 use chrono::{TimeZone, Utc};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Map as JsonMap, Value as JsonValue, json};
 
 use base64::Engine as _;
@@ -31,10 +31,6 @@ use crate::demo::{
     setup::{ProvidersInput, discover_tenants},
     timer_scheduler::{TimerScheduler, TimerSchedulerConfig, discover_timer_handlers},
 };
-use crate::dev_mode::{
-    DevCliOverrides, DevMode, DevProfile, DevSettingsResolved, effective_dev_settings,
-    merge_settings,
-};
 use crate::dev_store_path;
 use crate::discovery;
 use crate::domains::{self, Domain, DomainAction};
@@ -43,8 +39,9 @@ use crate::messaging_universal::{
     dto::{EncodeInV1, EncodeOutV1, RenderPlanOutV1, SendPayloadOutV1},
     egress,
 };
+use crate::operator_i18n;
 use crate::operator_log;
-use crate::project::{self, ScanFormat};
+use crate::project;
 use crate::provider_registry;
 use crate::runner_exec;
 use crate::runner_integration;
@@ -52,7 +49,6 @@ use crate::runtime_state::RuntimePaths;
 use crate::secrets_gate::{self, DynSecretsManager, SecretsManagerHandle};
 use crate::secrets_manager;
 use crate::secrets_setup::resolve_env;
-use crate::settings;
 use crate::setup_input::{SetupInputAnswers, collect_setup_answers, load_setup_input};
 use crate::state_layout;
 use crate::subscriptions_universal::{
@@ -64,6 +60,7 @@ use crate::subscriptions_universal::{
 };
 use crate::wizard;
 use crate::wizard_executor;
+use crate::wizard_i18n;
 use crate::wizard_plan_builder;
 use crate::wizard_spec_builder;
 use greentic_qa_lib::{
@@ -75,34 +72,23 @@ use greentic_types::{ChannelMessageEnvelope, Destination, EnvId, TeamId, TenantC
 use std::time::Duration;
 use uuid::Uuid;
 
-mod dev_mode_cmd;
-
-use dev_mode_cmd::{
-    DevModeDetectArgs, DevModeMapCommand, DevModeOffArgs, DevModeOnArgs, DevModeStatusArgs,
-};
 #[derive(Parser)]
 #[command(name = "greentic-operator")]
 #[command(about = "Greentic operator tooling", version)]
 pub struct Cli {
+    #[arg(long, global = true, help = "CLI locale (for translated output).")]
+    locale: Option<String>,
     #[command(subcommand)]
     command: Command,
 }
 
 #[derive(Subcommand)]
 enum Command {
-    #[command(hide = true)]
-    Dev(DevCommand),
     Demo(Box<DemoCommand>),
     #[command(
         about = "Alias of demo wizard. Plan/create a demo bundle with pack refs and allow rules."
     )]
-    Wizard(DemoWizardArgs),
-}
-
-#[derive(Parser)]
-struct DevCommand {
-    #[command(subcommand)]
-    command: DevSubcommand,
+    Wizard(Box<DemoWizardArgs>),
 }
 
 #[derive(Parser)]
@@ -111,34 +97,6 @@ struct DemoCommand {
     debug: bool,
     #[command(subcommand)]
     command: DemoSubcommand,
-}
-
-#[derive(Subcommand)]
-enum DevSubcommand {
-    On(DevModeOnArgs),
-    Off(DevModeOffArgs),
-    Status(DevModeStatusArgs),
-    Detect(DevModeDetectArgs),
-    Map(DevModeMapCommand),
-    Init(DevInitArgs),
-    Scan(DevScanArgs),
-    Sync(DevSyncArgs),
-    Tenant(TenantCommand),
-    Team(TeamCommand),
-    Allow(DevPolicyArgs),
-    Forbid(DevPolicyArgs),
-    #[command(hide = true)]
-    Up(DevUpArgs),
-    #[command(hide = true)]
-    Down(DevDownArgs),
-    #[command(name = "svc-status", hide = true)]
-    SvcStatus(DevStatusArgs),
-    #[command(hide = true)]
-    Logs(DevLogsArgs),
-    Setup(DomainSetupArgs),
-    Diagnostics(DomainDiagnosticsArgs),
-    Verify(DomainVerifyArgs),
-    Doctor(DevDoctorArgs),
 }
 
 #[derive(Subcommand)]
@@ -175,314 +133,6 @@ enum DemoSubcommand {
     Wizard(DemoWizardArgs),
 }
 
-#[derive(Parser)]
-#[command(
-    about = "Initialize a new Greentic project layout.",
-    long_about = "Creates the standard project directory layout, greentic.yaml, and the default tenant gmap.",
-    after_help = "Main options:\n  (none)\n\nOptional options:\n  --project-root <PATH> (default: current directory)"
-)]
-struct DevInitArgs {
-    #[arg(long)]
-    project_root: Option<PathBuf>,
-}
-
-#[derive(Parser)]
-#[command(
-    about = "Scan providers, packs, tenants, and teams.",
-    long_about = "Scans the project layout and prints a summary or structured output.",
-    after_help = "Main options:\n  (none)\n\nOptional options:\n  --format <text|json|yaml> (default: text)\n  --project-root <PATH> (default: current directory)"
-)]
-struct DevScanArgs {
-    #[arg(long, value_enum, default_value_t = Format::Text)]
-    format: Format,
-    #[arg(long)]
-    project_root: Option<PathBuf>,
-}
-
-#[derive(Parser)]
-#[command(
-    about = "Generate resolved manifests for tenants and teams.",
-    long_about = "Writes state/resolved/<tenant>[.<team>].yaml from discovered packs, providers, and gmaps.",
-    after_help = "Main options:\n  (none)\n\nOptional options:\n  --project-root <PATH> (default: current directory)"
-)]
-struct DevSyncArgs {
-    #[arg(long)]
-    project_root: Option<PathBuf>,
-}
-
-#[derive(Parser)]
-struct TenantCommand {
-    #[command(subcommand)]
-    command: TenantSubcommand,
-}
-
-#[derive(Subcommand)]
-enum TenantSubcommand {
-    Add(TenantAddArgs),
-    Rm(TenantRmArgs),
-    List(TenantListArgs),
-}
-
-#[derive(Parser)]
-#[command(
-    about = "Add a tenant and initialize its gmap.",
-    long_about = "Creates tenants/<tenant>/tenant.gmap with a default policy.",
-    after_help = "Main options:\n  <TENANT>\n\nOptional options:\n  --project-root <PATH> (default: current directory)"
-)]
-struct TenantAddArgs {
-    tenant: String,
-    #[arg(long)]
-    project_root: Option<PathBuf>,
-}
-
-#[derive(Parser)]
-#[command(
-    about = "Remove a tenant and its data.",
-    long_about = "Deletes tenants/<tenant> and any team gmaps under it.",
-    after_help = "Main options:\n  <TENANT>\n\nOptional options:\n  --project-root <PATH> (default: current directory)"
-)]
-struct TenantRmArgs {
-    tenant: String,
-    #[arg(long)]
-    project_root: Option<PathBuf>,
-}
-
-#[derive(Parser)]
-#[command(
-    about = "List tenants in the project.",
-    long_about = "Reads tenants/ and prints tenant ids.",
-    after_help = "Main options:\n  (none)\n\nOptional options:\n  --project-root <PATH> (default: current directory)"
-)]
-struct TenantListArgs {
-    #[arg(long)]
-    project_root: Option<PathBuf>,
-}
-
-#[derive(Parser)]
-struct TeamCommand {
-    #[command(subcommand)]
-    command: TeamSubcommand,
-}
-
-#[derive(Subcommand)]
-enum TeamSubcommand {
-    Add(TeamAddArgs),
-    Rm(TeamRmArgs),
-    List(TeamListArgs),
-}
-
-#[derive(Parser)]
-#[command(
-    about = "Add a team under a tenant and initialize its gmap.",
-    long_about = "Creates tenants/<tenant>/teams/<team>/team.gmap with a default policy.",
-    after_help = "Main options:\n  <TEAM>\n  --tenant <TENANT>\n\nOptional options:\n  --project-root <PATH> (default: current directory)"
-)]
-struct TeamAddArgs {
-    #[arg(long)]
-    tenant: String,
-    team: String,
-    #[arg(long)]
-    project_root: Option<PathBuf>,
-}
-
-#[derive(Parser)]
-#[command(
-    about = "Remove a team from a tenant.",
-    long_about = "Deletes tenants/<tenant>/teams/<team> and its gmap.",
-    after_help = "Main options:\n  <TEAM>\n  --tenant <TENANT>\n\nOptional options:\n  --project-root <PATH> (default: current directory)"
-)]
-struct TeamRmArgs {
-    #[arg(long)]
-    tenant: String,
-    team: String,
-    #[arg(long)]
-    project_root: Option<PathBuf>,
-}
-
-#[derive(Parser)]
-#[command(
-    about = "List teams for a tenant.",
-    long_about = "Reads tenants/<tenant>/teams and prints team ids.",
-    after_help = "Main options:\n  --tenant <TENANT>\n\nOptional options:\n  --project-root <PATH> (default: current directory)"
-)]
-struct TeamListArgs {
-    #[arg(long)]
-    tenant: String,
-    #[arg(long)]
-    project_root: Option<PathBuf>,
-}
-
-#[derive(Parser)]
-#[command(
-    about = "Start local messaging services (and NATS unless disabled).",
-    long_about = "Uses state/resolved/<tenant>[.<team>].yaml and launches greentic-messaging and optional NATS.",
-    after_help = "Main options:\n  --tenant <TENANT>\n\nOptional options:\n  --team <TEAM>\n  --no-nats\n  --nats-url <URL>\n  --project-root <PATH> (default: current directory)\n  --dev-mode <auto|on|off>\n  --dev-root <PATH>\n  --dev-profile <debug|release>\n  --dev-target-dir <PATH>"
-)]
-struct DevUpArgs {
-    #[arg(long)]
-    tenant: String,
-    #[arg(long)]
-    team: Option<String>,
-    #[arg(long)]
-    no_nats: bool,
-    #[arg(long)]
-    nats_url: Option<String>,
-    #[arg(long)]
-    project_root: Option<PathBuf>,
-    #[command(flatten)]
-    dev: DevModeArgs,
-}
-
-#[derive(Parser)]
-#[command(
-    about = "Run GSM gateway/egress/subscriptions in-process for local dev.",
-    long_about = "Hosts the GSM services inside the operator process and blocks until Ctrl+C.",
-    after_help = "Optional options:\n  --project-root <PATH> (default: current directory)\n  --no-nats"
-)]
-struct DevEmbeddedArgs {
-    #[arg(long)]
-    project_root: Option<PathBuf>,
-    #[arg(long)]
-    no_nats: bool,
-}
-
-#[derive(Parser)]
-#[command(
-    about = "Stop local messaging services (and NATS unless disabled).",
-    long_about = "Stops services started by dev up and removes pidfiles.",
-    after_help = "Main options:\n  --tenant <TENANT>\n\nOptional options:\n  --team <TEAM>\n  --no-nats\n  --project-root <PATH> (default: current directory)"
-)]
-struct DevDownArgs {
-    #[arg(long)]
-    tenant: String,
-    #[arg(long)]
-    team: Option<String>,
-    #[arg(long)]
-    no_nats: bool,
-    #[arg(long)]
-    project_root: Option<PathBuf>,
-}
-
-#[derive(Parser)]
-#[command(
-    about = "Show running status for local messaging services.",
-    long_about = "Checks pidfiles for messaging and optional NATS.",
-    after_help = "Main options:\n  --tenant <TENANT>\n\nOptional options:\n  --team <TEAM>\n  --no-nats\n  --project-root <PATH> (default: current directory)"
-)]
-struct DevStatusArgs {
-    #[arg(long)]
-    tenant: String,
-    #[arg(long)]
-    team: Option<String>,
-    #[arg(long)]
-    no_nats: bool,
-    #[arg(long)]
-    project_root: Option<PathBuf>,
-}
-
-#[derive(Parser)]
-#[command(
-    about = "Tail logs for messaging or NATS.",
-    long_about = "Streams the latest log output for the selected service.",
-    after_help = "Main options:\n  --tenant <TENANT>\n\nOptional options:\n  --team <TEAM>\n  --service <messaging|nats>\n  --project-root <PATH> (default: current directory)"
-)]
-struct DevLogsArgs {
-    #[arg(long)]
-    tenant: String,
-    #[arg(long)]
-    team: Option<String>,
-    #[arg(long)]
-    service: Option<LogService>,
-    #[arg(long)]
-    project_root: Option<PathBuf>,
-}
-
-#[derive(Parser)]
-#[command(
-    about = "Run provider setup flows for a domain.",
-    long_about = "Executes setup_default across providers and can auto-run secrets init for messaging.",
-    after_help = "Main options:\n  <DOMAIN>\n  --tenant <TENANT>\n\nOptional options:\n  --team <TEAM>\n  --provider <FILTER>\n  --dry-run\n  --format <text|json|yaml> (default: text)\n  --parallel <N> (default: 1)\n  --allow-missing-setup\n  --allow-contract-change\n  --backup\n  --online\n  --secrets-env <ENV>\n  --project-root <PATH> (default: current directory)"
-)]
-struct DomainSetupArgs {
-    domain: DomainArg,
-    #[arg(long)]
-    tenant: String,
-    #[arg(long)]
-    team: Option<String>,
-    #[arg(long)]
-    provider: Option<String>,
-    #[arg(long)]
-    dry_run: bool,
-    #[arg(long, value_enum, default_value_t = PlanFormat::Text)]
-    format: PlanFormat,
-    #[arg(long, default_value_t = 1)]
-    parallel: usize,
-    #[arg(long)]
-    allow_missing_setup: bool,
-    #[arg(long)]
-    allow_contract_change: bool,
-    #[arg(long)]
-    backup: bool,
-    #[arg(long)]
-    online: bool,
-    #[arg(long)]
-    secrets_env: Option<String>,
-    #[arg(long)]
-    project_root: Option<PathBuf>,
-}
-
-#[derive(Parser)]
-#[command(
-    about = "Run provider diagnostics flows for a domain.",
-    long_about = "Executes diagnostics for each provider pack that defines it.",
-    after_help = "Main options:\n  <DOMAIN>\n  --tenant <TENANT>\n\nOptional options:\n  --team <TEAM>\n  --provider <FILTER>\n  --dry-run\n  --format <text|json|yaml> (default: text)\n  --parallel <N> (default: 1)\n  --online\n  --project-root <PATH> (default: current directory)"
-)]
-struct DomainDiagnosticsArgs {
-    domain: DomainArg,
-    #[arg(long)]
-    tenant: String,
-    #[arg(long)]
-    team: Option<String>,
-    #[arg(long)]
-    provider: Option<String>,
-    #[arg(long)]
-    dry_run: bool,
-    #[arg(long, value_enum, default_value_t = PlanFormat::Text)]
-    format: PlanFormat,
-    #[arg(long, default_value_t = 1)]
-    parallel: usize,
-    #[arg(long)]
-    online: bool,
-    #[arg(long)]
-    project_root: Option<PathBuf>,
-}
-
-#[derive(Parser)]
-#[command(
-    about = "Run provider verify flows for a domain.",
-    long_about = "Executes verify_* flows where available for the selected domain.",
-    after_help = "Main options:\n  <DOMAIN>\n  --tenant <TENANT>\n\nOptional options:\n  --team <TEAM>\n  --provider <FILTER>\n  --dry-run\n  --format <text|json|yaml> (default: text)\n  --parallel <N> (default: 1)\n  --online\n  --project-root <PATH> (default: current directory)"
-)]
-struct DomainVerifyArgs {
-    domain: DomainArg,
-    #[arg(long)]
-    tenant: String,
-    #[arg(long)]
-    team: Option<String>,
-    #[arg(long)]
-    provider: Option<String>,
-    #[arg(long)]
-    dry_run: bool,
-    #[arg(long, value_enum, default_value_t = PlanFormat::Text)]
-    format: PlanFormat,
-    #[arg(long, default_value_t = 1)]
-    parallel: usize,
-    #[arg(long)]
-    online: bool,
-    #[arg(long)]
-    project_root: Option<PathBuf>,
-}
-
 #[derive(Clone, Copy, Debug, ValueEnum)]
 enum DomainArg {
     Messaging,
@@ -491,46 +141,10 @@ enum DomainArg {
 }
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
-enum DoctorDomainArg {
-    Messaging,
-    Events,
-    Secrets,
-    All,
-}
-
-#[derive(Clone, Copy, Debug, ValueEnum)]
 enum PlanFormat {
     Text,
     Json,
     Yaml,
-}
-
-#[derive(Parser)]
-#[command(
-    about = "Run domain doctor validation.",
-    long_about = "Executes greentic-pack doctor with optional validators.",
-    after_help = "Main options:\n  <DOMAIN>\n\nOptional options:\n  --tenant <TENANT>\n  --team <TEAM>\n  --strict\n  --validator-pack <PATH>...\n  --project-root <PATH> (default: current directory)\n  --dev-mode <auto|on|off>\n  --dev-root <PATH>\n  --dev-profile <debug|release>\n  --dev-target-dir <PATH>"
-)]
-struct DevDoctorArgs {
-    domain: DoctorDomainArg,
-    #[arg(long)]
-    tenant: Option<String>,
-    #[arg(long)]
-    team: Option<String>,
-    #[arg(long)]
-    strict: bool,
-    #[arg(long)]
-    validator_pack: Vec<PathBuf>,
-    #[arg(long)]
-    project_root: Option<PathBuf>,
-    #[command(flatten)]
-    dev: DevModeArgs,
-}
-
-#[derive(Clone, Copy, Debug, ValueEnum)]
-enum LogService {
-    Messaging,
-    Nats,
 }
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
@@ -553,7 +167,7 @@ enum RestartTarget {
 #[command(
     about = "Build a portable demo bundle.",
     long_about = "Copies packs/providers/tenants and writes resolved manifests under the output directory.",
-    after_help = "Main options:\n  --out <DIR>\n\nOptional options:\n  --tenant <TENANT>\n  --team <TEAM>\n  --allow-pack-dirs\n  --only-used-providers\n  --doctor\n  --skip-doctor\n  --project-root <PATH> (default: current directory)\n  --dev-mode <auto|on|off>\n  --dev-root <PATH>\n  --dev-profile <debug|release>\n  --dev-target-dir <PATH>"
+    after_help = "Main options:\n  --out <DIR>\n\nOptional options:\n  --tenant <TENANT>\n  --team <TEAM>\n  --allow-pack-dirs\n  --only-used-providers\n  --doctor\n  --skip-doctor\n  --project-root <PATH> (default: current directory)"
 )]
 struct DemoBuildArgs {
     #[arg(long)]
@@ -572,8 +186,6 @@ struct DemoBuildArgs {
     skip_doctor: bool,
     #[arg(long)]
     project_root: Option<PathBuf>,
-    #[command(flatten)]
-    dev: DevModeArgs,
 }
 
 #[derive(Parser)]
@@ -743,8 +355,6 @@ struct DemoUpArgs {
         conflicts_with = "verbose"
     )]
     quiet: bool,
-    #[command(flatten)]
-    dev: DevModeArgs,
 }
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
@@ -863,7 +473,7 @@ struct DemoPolicyArgs {
 #[command(
     about = "Plan/create a demo bundle with pack refs and allow rules.",
     long_about = "Builds a deterministic wizard plan first. Execution reuses the same gmap + resolver + resolved-copy lifecycle as demo allow.",
-    after_help = "Main options:\n  --mode <create|update|remove>\n  --bundle <DIR> (or provide in --qa-answers)\n\nOptional options:\n  --qa-answers <PATH>\n  --catalog-pack <ID> (repeatable)\n  --pack-ref <REF> (repeatable, oci://|repo://|store://)\n  --provider-registry <REF>\n  --locale <TAG> (default: en-GB)\n  --tenant <TENANT> (default: demo)\n  --team <TEAM>\n  --target <tenant[:team]> (repeatable)\n  --allow <PACK[/FLOW[/NODE]]> (repeatable)\n  --execute\n  --dry-run\n  --offline\n  --verbose\n  --run-setup"
+    after_help = "Main options:\n  --mode <create|update|remove>\n  --bundle <DIR> (or provide in --qa-answers)\n\nOptional options:\n  --qa-answers <PATH>\n  --catalog-pack <ID> (repeatable)\n  --pack-ref <REF> (repeatable, oci://|repo://|store://)\n  --provider-registry <REF>\n  --locale <TAG> (default: detected from system locale)\n  --tenant <TENANT> (default: demo)\n  --team <TEAM>\n  --target <tenant[:team]> (repeatable)\n  --allow <PACK[/FLOW[/NODE]]> (repeatable)\n  --execute\n  --dry-run\n  --offline\n  --verbose\n  --run-setup"
 )]
 struct DemoWizardArgs {
     #[arg(long, value_enum, default_value_t = WizardModeArg::Create)]
@@ -920,12 +530,8 @@ struct DemoWizardArgs {
     dry_run: bool,
     #[arg(long, help = "Resolve packs in offline mode (cache-only).")]
     offline: bool,
-    #[arg(
-        long,
-        default_value = "en-GB",
-        help = "Locale tag for wizard QA rendering."
-    )]
-    locale: String,
+    #[arg(long, help = "Locale tag for wizard QA rendering.")]
+    locale: Option<String>,
     #[arg(long, help = "Print detailed plan step fields.")]
     verbose: bool,
     #[arg(long, help = "Run existing provider setup flows after execution.")]
@@ -941,7 +547,7 @@ enum WizardModeArg {
     Remove,
 }
 
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Default, Deserialize, Serialize)]
 struct WizardQaAnswers {
     #[serde(alias = "bundle_path")]
     bundle: Option<PathBuf>,
@@ -975,29 +581,32 @@ struct WizardQaAnswers {
     execution_mode: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 #[serde(untagged)]
 enum WizardCatalogPackAnswer {
     Id(String),
     Item { id: String },
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 #[serde(untagged)]
 enum WizardPackRefAnswer {
     Ref(String),
     Item {
         pack_ref: String,
         #[serde(default)]
+        access_scope: Option<String>,
+        #[serde(default)]
+        #[serde(alias = "make_default_scope")]
+        make_default_pack: Option<String>,
+        #[serde(default)]
         tenant_id: Option<String>,
         #[serde(default)]
         team_id: Option<String>,
-        #[serde(default)]
-        make_default_scope: Option<String>,
     },
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 #[serde(untagged)]
 enum WizardTargetAnswer {
     Target(String),
@@ -1008,7 +617,7 @@ enum WizardTargetAnswer {
     },
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 #[serde(untagged)]
 enum WizardProviderAnswer {
     Id(String),
@@ -1018,14 +627,14 @@ enum WizardProviderAnswer {
     },
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 #[serde(untagged)]
 enum WizardUpdateOpAnswer {
     Op(String),
     Item { op: String },
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 #[serde(untagged)]
 enum WizardRemoveTargetAnswer {
     Target(String),
@@ -1035,7 +644,7 @@ enum WizardRemoveTargetAnswer {
     },
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 #[serde(untagged)]
 enum WizardPackRemoveAnswer {
     Pack(String),
@@ -1049,7 +658,7 @@ enum WizardPackRemoveAnswer {
     },
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 #[serde(untagged)]
 enum WizardAccessChangeAnswer {
     Item {
@@ -1113,13 +722,11 @@ struct DemoLogsArgs {
 #[command(
     about = "Run demo doctor validation from a bundle.",
     long_about = "Runs greentic-pack doctor against packs in the demo bundle.",
-    after_help = "Main options:\n  --bundle <DIR>\n\nOptional options:\n  --dev-mode <auto|on|off>\n  --dev-root <PATH>\n  --dev-profile <debug|release>\n  --dev-target-dir <PATH>"
+    after_help = "Main options:\n  --bundle <DIR>"
 )]
 struct DemoDoctorArgs {
     #[arg(long)]
     bundle: PathBuf,
-    #[command(flatten)]
-    dev: DevModeArgs,
 }
 
 #[derive(Parser)]
@@ -1452,11 +1059,34 @@ impl DemoRunArgs {
                 }
             },
         };
-        println!("Run summary:");
-        println!("  pack: {} ({})", pack.pack_id, pack_path.display());
-        println!("  tenant: {} team: {}", self.tenant, team_display);
-        println!("  flow: {}", flow_id);
-        println!("  input: {}", input_desc);
+        println!(
+            "{}",
+            operator_i18n::tr("cli.run.summary_header", "Run summary:")
+        );
+        println!(
+            "{}",
+            operator_i18n::trf(
+                "cli.run.summary_pack",
+                "  pack: {} ({})",
+                &[&pack.pack_id, &pack_path.display().to_string()]
+            )
+        );
+        println!(
+            "{}",
+            operator_i18n::trf(
+                "cli.run.summary_tenant_team",
+                "  tenant: {} team: {}",
+                &[&self.tenant, team_display]
+            )
+        );
+        println!(
+            "{}",
+            operator_i18n::trf("cli.run.summary_flow", "  flow: {}", &[&flow_id])
+        );
+        println!(
+            "{}",
+            operator_i18n::trf("cli.run.summary_input", "  input: {}", &[&input_desc])
+        );
 
         let initial_input = parsed_input
             .as_ref()
@@ -1479,7 +1109,13 @@ impl DemoRunArgs {
             secrets_manager,
         )?;
         let mut repl = DemoRepl::new(runner);
-        println!("Entering interactive mode (type @help for commands).");
+        println!(
+            "{}",
+            operator_i18n::tr(
+                "cli.run.enter_interactive",
+                "Entering interactive mode (type @help for commands)."
+            )
+        );
         repl.run()?;
         Ok(())
     }
@@ -1521,9 +1157,23 @@ impl DemoListPacksArgs {
         }
 
         if provider_packs.is_empty() {
-            println!("no packs found for domain {:?}", domain);
+            println!(
+                "{}",
+                operator_i18n::trf(
+                    "cli.list_packs.none_for_domain",
+                    "no packs found for domain {}",
+                    &[domains::domain_name(domain)]
+                )
+            );
         } else {
-            println!("packs for {}:", domains::domain_name(domain));
+            println!(
+                "{}",
+                operator_i18n::trf(
+                    "cli.list_packs.for_domain",
+                    "packs for {}:",
+                    &[domains::domain_name(domain)]
+                )
+            );
             for pack in &provider_packs {
                 println!(
                     "  {} ({} entry flows) {}",
@@ -1538,7 +1188,10 @@ impl DemoListPacksArgs {
             if !provider_packs.is_empty() {
                 println!();
             }
-            println!("packs for applications:");
+            println!(
+                "{}",
+                operator_i18n::tr("cli.list_packs.for_applications", "packs for applications:")
+            );
             for pack in app_packs {
                 let relative = pack
                     .path
@@ -1575,11 +1228,18 @@ impl DemoListFlowsArgs {
         let domain = Domain::from(self.domain);
         let pack = demo_provider_pack_by_filter(&self.bundle, domain, &self.pack)?;
         println!(
-            "flows declared by pack {} ({}):",
-            pack.pack_id, pack.file_name
+            "{}",
+            operator_i18n::trf(
+                "cli.list_flows.header",
+                "flows declared by pack {} ({}):",
+                &[&pack.pack_id, &pack.file_name]
+            )
         );
         for flow_id in pack.entry_flows {
-            println!("  - {}", flow_id);
+            println!(
+                "{}",
+                operator_i18n::trf("cli.list_flows.item", "  - {}", &[&flow_id])
+            );
         }
         Ok(())
     }
@@ -1739,7 +1399,10 @@ impl DemoSubscriptionsStatusArgs {
             })
             .collect::<Vec<_>>();
         if filtered.is_empty() {
-            println!("no subscriptions found");
+            println!(
+                "{}",
+                operator_i18n::tr("cli.subscriptions.none", "no subscriptions found")
+            );
             return Ok(());
         }
         for state in filtered {
@@ -1795,13 +1458,22 @@ impl DemoSubscriptionsRenewArgs {
                     anyhow!("subscription {binding} not found for provider {provider}")
                 })?;
             scheduler.renew_binding(&state)?;
-            println!("renewed {}", binding);
+            println!(
+                "{}",
+                operator_i18n::trf("cli.subscriptions.renewed", "renewed {}", &[&binding])
+            );
             return Ok(());
         }
 
         let skew = Duration::from_secs(skew_minutes * 60);
         scheduler.renew_due(skew)?;
-        println!("renewed eligible subscriptions");
+        println!(
+            "{}",
+            operator_i18n::tr(
+                "cli.subscriptions.renewed_eligible",
+                "renewed eligible subscriptions"
+            )
+        );
         Ok(())
     }
 }
@@ -1832,7 +1504,10 @@ impl DemoSubscriptionsDeleteArgs {
                 anyhow!("subscription {binding_id} not found for provider {provider}")
             })?;
         scheduler.delete_binding(&state)?;
-        println!("deleted {}", binding_id);
+        println!(
+            "{}",
+            operator_i18n::trf("cli.subscriptions.deleted", "deleted {}", &[&binding_id])
+        );
         Ok(())
     }
 }
@@ -1902,7 +1577,13 @@ impl DemoCapabilitySetupPlanArgs {
         };
         let plan = runner_host.capability_setup_plan(&ctx);
         if plan.is_empty() {
-            println!("no capabilities requiring setup found");
+            println!(
+                "{}",
+                operator_i18n::tr(
+                    "cli.capabilities.none_requiring_setup",
+                    "no capabilities requiring setup found"
+                )
+            );
             return Ok(());
         }
         for item in plan {
@@ -1947,7 +1628,14 @@ impl DemoCapabilityMarkReadyArgs {
             correlation_id: None,
         };
         let path = runner_host.mark_capability_ready(&ctx, &binding)?;
-        println!("capability marked ready: {}", path.display());
+        println!(
+            "{}",
+            operator_i18n::trf(
+                "cli.capabilities.marked_ready",
+                "capability marked ready: {}",
+                &[&path.display().to_string()]
+            )
+        );
         Ok(())
     }
 }
@@ -1980,7 +1668,14 @@ impl DemoCapabilityMarkFailedArgs {
             correlation_id: None,
         };
         let path = runner_host.mark_capability_failed(&ctx, &binding, &self.key)?;
-        println!("capability marked failed: {}", path.display());
+        println!(
+            "{}",
+            operator_i18n::trf(
+                "cli.capabilities.marked_failed",
+                "capability marked failed: {}",
+                &[&path.display().to_string()]
+            )
+        );
         Ok(())
     }
 }
@@ -2014,31 +1709,6 @@ struct DevPolicyArgs {
     project_root: Option<PathBuf>,
 }
 
-#[derive(Clone, Debug, Parser)]
-struct DevModeArgs {
-    #[arg(long, value_enum)]
-    dev_mode: Option<DevModeArg>,
-    #[arg(long)]
-    dev_root: Option<PathBuf>,
-    #[arg(long, value_enum)]
-    dev_profile: Option<DevProfileArg>,
-    #[arg(long)]
-    dev_target_dir: Option<PathBuf>,
-}
-
-#[derive(Clone, Copy, Debug, ValueEnum)]
-enum DevModeArg {
-    Auto,
-    On,
-    Off,
-}
-
-#[derive(Clone, Copy, Debug, ValueEnum)]
-enum DevProfileArg {
-    Debug,
-    Release,
-}
-
 #[derive(Clone, Copy, Debug, ValueEnum)]
 enum Format {
     Text,
@@ -2048,61 +1718,17 @@ enum Format {
 
 impl Cli {
     pub fn run(self) -> anyhow::Result<()> {
-        let settings = settings::load_settings()?;
-        let mut ctx = AppCtx { settings };
+        let selected_locale = operator_i18n::select_locale(self.locale.as_deref());
+        operator_i18n::set_locale(&selected_locale);
+        let ctx = AppCtx {};
         match self.command {
-            Command::Dev(dev) => dev.run(&mut ctx),
             Command::Demo(demo) => demo.run(&ctx),
             Command::Wizard(args) => args.run(),
         }
     }
 }
 
-struct AppCtx {
-    settings: settings::OperatorSettings,
-}
-
-impl DevCommand {
-    fn run(self, ctx: &mut AppCtx) -> anyhow::Result<()> {
-        match self.command {
-            DevSubcommand::On(args) => {
-                ctx.settings = args.run(ctx.settings.clone())?;
-                Ok(())
-            }
-            DevSubcommand::Off(args) => {
-                ctx.settings = args.run(ctx.settings.clone())?;
-                Ok(())
-            }
-            DevSubcommand::Status(args) => {
-                ctx.settings = args.run(ctx.settings.clone())?;
-                Ok(())
-            }
-            DevSubcommand::Detect(args) => {
-                ctx.settings = args.run(ctx.settings.clone())?;
-                Ok(())
-            }
-            DevSubcommand::Map(args) => {
-                ctx.settings = args.run(ctx.settings.clone())?;
-                Ok(())
-            }
-            DevSubcommand::Init(args) => args.run(),
-            DevSubcommand::Scan(args) => args.run(),
-            DevSubcommand::Sync(args) => args.run(),
-            DevSubcommand::Tenant(args) => args.run(),
-            DevSubcommand::Team(args) => args.run(),
-            DevSubcommand::Allow(args) => args.run(Policy::Public),
-            DevSubcommand::Forbid(args) => args.run(Policy::Forbidden),
-            DevSubcommand::Up(args) => args.run(ctx),
-            DevSubcommand::Down(args) => args.run(),
-            DevSubcommand::SvcStatus(args) => args.run(),
-            DevSubcommand::Logs(args) => args.run(),
-            DevSubcommand::Setup(args) => args.run(),
-            DevSubcommand::Diagnostics(args) => args.run(),
-            DevSubcommand::Verify(args) => args.run(),
-            DevSubcommand::Doctor(args) => args.run(ctx),
-        }
-    }
-}
+struct AppCtx {}
 
 impl DemoCommand {
     fn run(self, ctx: &AppCtx) -> anyhow::Result<()> {
@@ -2140,371 +1766,8 @@ impl DemoCommand {
     }
 }
 
-impl DevInitArgs {
-    fn run(self) -> anyhow::Result<()> {
-        let root = project_root(self.project_root)?;
-        project::init_project(&root)
-    }
-}
-
-impl DevScanArgs {
-    fn run(self) -> anyhow::Result<()> {
-        let root = project_root(self.project_root)?;
-        let format = match self.format {
-            Format::Text => ScanFormat::Text,
-            Format::Json => ScanFormat::Json,
-            Format::Yaml => ScanFormat::Yaml,
-        };
-        project::scan_project(&root, format)
-    }
-}
-
-impl DevSyncArgs {
-    fn run(self) -> anyhow::Result<()> {
-        let root = project_root(self.project_root)?;
-        project::sync_project(&root)
-    }
-}
-
-impl TenantCommand {
-    fn run(self) -> anyhow::Result<()> {
-        match self.command {
-            TenantSubcommand::Add(args) => args.run(),
-            TenantSubcommand::Rm(args) => args.run(),
-            TenantSubcommand::List(args) => args.run(),
-        }
-    }
-}
-
-impl TenantAddArgs {
-    fn run(self) -> anyhow::Result<()> {
-        let root = project_root(self.project_root)?;
-        project::add_tenant(&root, &self.tenant)
-    }
-}
-
-impl TenantRmArgs {
-    fn run(self) -> anyhow::Result<()> {
-        let root = project_root(self.project_root)?;
-        project::remove_tenant(&root, &self.tenant)
-    }
-}
-
-impl TenantListArgs {
-    fn run(self) -> anyhow::Result<()> {
-        let root = project_root(self.project_root)?;
-        for tenant in project::list_tenants(&root)? {
-            println!("{tenant}");
-        }
-        Ok(())
-    }
-}
-
-impl TeamCommand {
-    fn run(self) -> anyhow::Result<()> {
-        match self.command {
-            TeamSubcommand::Add(args) => args.run(),
-            TeamSubcommand::Rm(args) => args.run(),
-            TeamSubcommand::List(args) => args.run(),
-        }
-    }
-}
-
-impl TeamAddArgs {
-    fn run(self) -> anyhow::Result<()> {
-        let root = project_root(self.project_root)?;
-        project::add_team(&root, &self.tenant, &self.team)
-    }
-}
-
-impl TeamRmArgs {
-    fn run(self) -> anyhow::Result<()> {
-        let root = project_root(self.project_root)?;
-        project::remove_team(&root, &self.tenant, &self.team)
-    }
-}
-
-impl TeamListArgs {
-    fn run(self) -> anyhow::Result<()> {
-        let root = project_root(self.project_root)?;
-        for team in project::list_teams(&root, &self.tenant)? {
-            println!("{team}");
-        }
-        Ok(())
-    }
-}
-
-impl DevPolicyArgs {
-    fn run(self, policy: Policy) -> anyhow::Result<()> {
-        let root = project_root(self.project_root)?;
-        let gmap_path = match self.team {
-            Some(team) => root
-                .join("tenants")
-                .join(&self.tenant)
-                .join("teams")
-                .join(team)
-                .join("team.gmap"),
-            None => root.join("tenants").join(&self.tenant).join("tenant.gmap"),
-        };
-        gmap::upsert_policy(&gmap_path, &self.path, policy)
-    }
-}
-
-impl DevUpArgs {
-    fn run(self, ctx: &AppCtx) -> anyhow::Result<()> {
-        let root = project_root(self.project_root)?;
-        let config = config::load_operator_config(&root)?;
-        let _ = resolve_dev_settings(&ctx.settings, config.as_ref(), &self.dev, &root)?;
-        let discovery = discovery::discover(&root)?;
-        discovery::persist(&root, &self.tenant, &discovery)?;
-        let services = config
-            .as_ref()
-            .and_then(|config| config.services.clone())
-            .unwrap_or_default();
-        let messaging_enabled = services
-            .messaging
-            .enabled
-            .is_enabled(discovery.domains.messaging);
-        let events_enabled = services.events.enabled.is_enabled(discovery.domains.events);
-
-        let mut nats_started = false;
-        if !self.no_nats && self.nats_url.is_none() && (messaging_enabled || events_enabled) {
-            if let Err(err) = crate::services::start_nats(&root) {
-                eprintln!("Warning: failed to start NATS: {err}");
-            } else {
-                nats_started = true;
-            }
-        }
-
-        if events_enabled {
-            println!("events: enabled (in-process via operator ingress + timer scheduler)");
-        } else {
-            println!("events: skipped (disabled or no providers)");
-        }
-
-        if messaging_enabled {
-            println!(
-                "messaging: enabled but handled by the embedded runner; use `demo start` to run messaging services."
-            );
-        } else {
-            println!("messaging: skipped (disabled or no providers)");
-        }
-
-        if nats_started {
-            let nats = crate::services::stop_nats(&root)?;
-            println!("nats: {:?}", nats);
-        }
-
-        Ok(())
-    }
-}
-
-impl DevDownArgs {
-    fn run(self) -> anyhow::Result<()> {
-        let root = project_root(self.project_root)?;
-        println!("messaging: runtime managed by `demo start`/`demo down`.");
-        println!("events: runtime handled in-process (nothing to stop).");
-
-        if !self.no_nats {
-            let nats = crate::services::stop_nats(&root)?;
-            println!("nats: {:?}", nats);
-        }
-        Ok(())
-    }
-}
-
-impl DevStatusArgs {
-    fn run(self) -> anyhow::Result<()> {
-        let root = project_root(self.project_root)?;
-        let config = config::load_operator_config(&root)?;
-        let discovery = discovery::discover(&root)?;
-        discovery::persist(&root, &self.tenant, &discovery)?;
-        println!(
-            "detected domains: messaging={} events={}",
-            discovery.domains.messaging, discovery.domains.events
-        );
-        for provider in &discovery.providers {
-            println!(
-                "detected provider: {} ({} via {:?})",
-                provider.provider_id, provider.domain, provider.id_source
-            );
-        }
-        let services = config
-            .as_ref()
-            .and_then(|config| config.services.clone())
-            .unwrap_or_default();
-        let messaging_enabled = services
-            .messaging
-            .enabled
-            .is_enabled(discovery.domains.messaging);
-        let events_enabled = services.events.enabled.is_enabled(discovery.domains.events);
-
-        if messaging_enabled {
-            println!("messaging: enabled (runtime managed by `demo start`/`demo down`).");
-        } else {
-            println!("messaging: skipped (disabled or no providers)");
-        }
-
-        if events_enabled {
-            println!("events: enabled (in-process via operator ingress + timer scheduler)");
-        } else {
-            println!("events: skipped (disabled or no providers)");
-        }
-
-        if !self.no_nats {
-            let nats = crate::services::nats_status(&root)?;
-            println!("nats: {:?}", nats);
-        }
-        Ok(())
-    }
-}
-
-impl DevLogsArgs {
-    fn run(self) -> anyhow::Result<()> {
-        let root = project_root(self.project_root)?;
-        match self.service.unwrap_or(LogService::Messaging) {
-            LogService::Messaging => {
-                println!(
-                    "messaging: logs appear while `demo start` runs; use `demo logs` to tail or print service logs."
-                );
-                Ok(())
-            }
-            LogService::Nats => crate::services::tail_nats_logs(&root),
-        }
-    }
-}
-
-impl DomainSetupArgs {
-    fn run(self) -> anyhow::Result<()> {
-        let root = project_root(self.project_root)?;
-        run_domain_command(DomainRunArgs {
-            root,
-            state_root: None,
-            domain: self.domain.into(),
-            action: DomainAction::Setup,
-            tenant: self.tenant,
-            team: self.team,
-            provider_filter: self.provider,
-            dry_run: self.dry_run,
-            format: self.format,
-            parallel: self.parallel,
-            allow_missing_setup: self.allow_missing_setup,
-            allow_contract_change: self.allow_contract_change,
-            backup: self.backup,
-            online: self.online,
-            secrets_env: self.secrets_env,
-            runner_binary: None,
-            best_effort: false,
-            setup_input: None,
-            allowed_providers: None,
-            preloaded_setup_answers: None,
-            public_base_url: None,
-            secrets_manager: None,
-            discovered_providers: None,
-        })
-    }
-}
-
-impl DomainDiagnosticsArgs {
-    fn run(self) -> anyhow::Result<()> {
-        let root = project_root(self.project_root)?;
-        run_domain_command(DomainRunArgs {
-            root,
-            state_root: None,
-            domain: self.domain.into(),
-            action: DomainAction::Diagnostics,
-            tenant: self.tenant,
-            team: self.team,
-            provider_filter: self.provider,
-            dry_run: self.dry_run,
-            format: self.format,
-            parallel: self.parallel,
-            allow_missing_setup: true,
-            allow_contract_change: false,
-            backup: false,
-            online: self.online,
-            secrets_env: None,
-            runner_binary: None,
-            best_effort: false,
-            setup_input: None,
-            allowed_providers: None,
-            preloaded_setup_answers: None,
-            public_base_url: None,
-            secrets_manager: None,
-            discovered_providers: None,
-        })
-    }
-}
-
-impl DomainVerifyArgs {
-    fn run(self) -> anyhow::Result<()> {
-        let root = project_root(self.project_root)?;
-        run_domain_command(DomainRunArgs {
-            root,
-            state_root: None,
-            domain: self.domain.into(),
-            action: DomainAction::Verify,
-            tenant: self.tenant,
-            team: self.team,
-            provider_filter: self.provider,
-            dry_run: self.dry_run,
-            format: self.format,
-            parallel: self.parallel,
-            allow_missing_setup: true,
-            allow_contract_change: false,
-            backup: false,
-            online: self.online,
-            secrets_env: None,
-            runner_binary: None,
-            best_effort: false,
-            setup_input: None,
-            allowed_providers: None,
-            preloaded_setup_answers: None,
-            public_base_url: None,
-            secrets_manager: None,
-            discovered_providers: None,
-        })
-    }
-}
-
-impl DevDoctorArgs {
-    fn run(self, ctx: &AppCtx) -> anyhow::Result<()> {
-        let root = project_root(self.project_root)?;
-        let config = config::load_operator_config(&root)?;
-        let dev_settings = resolve_dev_settings(&ctx.settings, config.as_ref(), &self.dev, &root)?;
-        let explicit = config::binary_override(config.as_ref(), "greentic-pack", &root);
-        let pack_command = bin_resolver::resolve_binary(
-            "greentic-pack",
-            &ResolveCtx {
-                config_dir: root.clone(),
-                dev: dev_settings,
-                explicit_path: explicit,
-            },
-        )?;
-
-        let scope = match self.domain {
-            DoctorDomainArg::Messaging => crate::doctor::DoctorScope::One(Domain::Messaging),
-            DoctorDomainArg::Events => crate::doctor::DoctorScope::One(Domain::Events),
-            DoctorDomainArg::Secrets => crate::doctor::DoctorScope::One(Domain::Secrets),
-            DoctorDomainArg::All => crate::doctor::DoctorScope::All,
-        };
-        crate::doctor::run_doctor(
-            &root,
-            scope,
-            crate::doctor::DoctorOptions {
-                tenant: self.tenant,
-                team: self.team,
-                strict: self.strict,
-                validator_packs: self.validator_pack,
-            },
-            &pack_command,
-        )?;
-        Ok(())
-    }
-}
-
 impl DemoBuildArgs {
-    fn run(self, ctx: &AppCtx) -> anyhow::Result<()> {
+    fn run(self, _ctx: &AppCtx) -> anyhow::Result<()> {
         let root = project_root(self.project_root)?;
         if demo_debug_enabled() {
             println!(
@@ -2533,14 +1796,12 @@ impl DemoBuildArgs {
             run_doctor,
         };
         let config = config::load_operator_config(&root)?;
-        let dev_settings = resolve_dev_settings(&ctx.settings, config.as_ref(), &self.dev, &root)?;
         let pack_command = if options.run_doctor {
             let explicit = config::binary_override(config.as_ref(), "greentic-pack", &root);
             Some(bin_resolver::resolve_binary(
                 "greentic-pack",
                 &ResolveCtx {
                     config_dir: root.clone(),
-                    dev: dev_settings,
                     explicit_path: explicit,
                 },
             )?)
@@ -2552,11 +1813,11 @@ impl DemoBuildArgs {
 }
 
 impl DemoUpArgs {
-    fn run_start(self, ctx: &AppCtx) -> anyhow::Result<()> {
-        self.run_with_shutdown(ctx)
+    fn run_start(self, _ctx: &AppCtx) -> anyhow::Result<()> {
+        self.run_with_shutdown()
     }
 
-    fn run_with_shutdown(self, ctx: &AppCtx) -> anyhow::Result<()> {
+    fn run_with_shutdown(self) -> anyhow::Result<()> {
         let restart: std::collections::BTreeSet<String> =
             self.restart.iter().map(restart_name).collect();
         let log_level = if self.quiet {
@@ -2592,7 +1853,11 @@ impl DemoUpArgs {
             let nats_mode = demo::NatsMode::from(nats_mode_arg);
             if matches!(nats_mode, demo::NatsMode::On) {
                 eprintln!(
-                    "Warning: '--nats=on' uses the legacy GSM NATS stack; switch to embedded mode when possible."
+                    "{}",
+                    operator_i18n::tr(
+                        "cli.start.warn_legacy_nats",
+                        "Warning: '--nats=on' uses the legacy GSM NATS stack; switch to embedded mode when possible."
+                    )
                 );
             }
             if demo_debug_enabled() {
@@ -2611,7 +1876,6 @@ impl DemoUpArgs {
                 .clone()
                 .unwrap_or_else(|| DEMO_DEFAULT_TENANT.to_string());
             let config = config::load_operator_config(&bundle)?;
-            let _ = resolve_dev_settings(&ctx.settings, config.as_ref(), &self.dev, &bundle)?;
             domains::ensure_cbor_packs(&bundle)?;
             let discovery = discovery::discover_with_options(
                 &bundle,
@@ -2649,7 +1913,6 @@ impl DemoUpArgs {
                         "cloudflared",
                         &ResolveCtx {
                             config_dir: bundle.clone(),
-                            dev: None,
                             explicit_path: explicit,
                         },
                     )?;
@@ -2697,8 +1960,12 @@ impl DemoUpArgs {
                     .collect::<Vec<_>>()
                     .join(",");
                 println!(
-                    "Public URL (cloudflared setup domains={domain_labels}): {}",
-                    handle.url
+                    "{}",
+                    operator_i18n::trf(
+                        "cli.start.public_url_setup_domains",
+                        "Public URL (cloudflared setup domains={}): {}",
+                        &[&domain_labels, &handle.url]
+                    )
                 );
                 public_base_url = Some(handle.url.clone());
                 started_cloudflared_early = true;
@@ -2759,9 +2026,12 @@ impl DemoUpArgs {
                             false,
                         ) {
                             eprintln!(
-                                "Warning: failed to stop earlier target tenant={} team={} : {cleanup_err}",
-                                target.tenant,
-                                target.team_id()
+                                "{}",
+                                operator_i18n::trf(
+                                    "cli.start.warn_failed_stop_earlier_target",
+                                    "Warning: failed to stop earlier target tenant={} team={} : {}",
+                                    &[&target.tenant, target.team_id(), &cleanup_err.to_string()]
+                                )
                             );
                         }
                     }
@@ -2784,14 +2054,27 @@ impl DemoUpArgs {
                 ) {
                     Ok(server) => {
                         println!(
-                            "HTTP ingress ready at http://{}:{}",
-                            demo_config.services.gateway.listen_addr,
-                            demo_config.services.gateway.port
+                            "{}",
+                            operator_i18n::trf(
+                                "cli.start.http_ingress_ready",
+                                "HTTP ingress ready at http://{}:{}",
+                                &[
+                                    &demo_config.services.gateway.listen_addr,
+                                    &demo_config.services.gateway.port.to_string()
+                                ]
+                            )
                         );
                         ingress_server = Some(server);
                     }
                     Err(err) => {
-                        eprintln!("Warning: HTTP ingress disabled: {err}");
+                        eprintln!(
+                            "{}",
+                            operator_i18n::trf(
+                                "cli.start.warn_http_ingress_disabled",
+                                "Warning: HTTP ingress disabled: {}",
+                                &[&err.to_string()]
+                            )
+                        );
                         operator_log::warn(
                             module_path!(),
                             format!("demo ingress server unavailable: {err}"),
@@ -2809,12 +2092,25 @@ impl DemoUpArgs {
                     self.team.as_deref().unwrap_or(DEMO_DEFAULT_TEAM),
                 ) {
                     Ok(Some(scheduler)) => {
-                        println!("events timer scheduler ready");
+                        println!(
+                            "{}",
+                            operator_i18n::tr(
+                                "cli.start.events_timer_scheduler_ready",
+                                "events timer scheduler ready"
+                            )
+                        );
                         timer_scheduler = Some(scheduler);
                     }
                     Ok(None) => {}
                     Err(err) => {
-                        eprintln!("Warning: events timer scheduler disabled: {err}");
+                        eprintln!(
+                            "{}",
+                            operator_i18n::trf(
+                                "cli.start.warn_events_timer_scheduler_disabled",
+                                "Warning: events timer scheduler disabled: {}",
+                                &[&err.to_string()]
+                            )
+                        );
                         operator_log::warn(
                             module_path!(),
                             format!("demo timer scheduler unavailable: {err}"),
@@ -2882,13 +2178,6 @@ impl DemoUpArgs {
         let demo_config = config::load_demo_config(&config_path)?;
         let tenant = demo_config.tenant.clone();
         let team = demo_config.team.clone();
-        let operator_config = config::load_operator_config(&config_dir)?;
-        let dev_settings = resolve_dev_settings(
-            &ctx.settings,
-            operator_config.as_ref(),
-            &self.dev,
-            &config_dir,
-        )?;
         let cloudflared = match self.cloudflared {
             CloudflaredModeArg::Off => None,
             CloudflaredModeArg::On => {
@@ -2897,7 +2186,6 @@ impl DemoUpArgs {
                     "cloudflared",
                     &ResolveCtx {
                         config_dir: config_dir.clone(),
-                        dev: None,
                         explicit_path: explicit,
                     },
                 )?;
@@ -2932,7 +2220,6 @@ impl DemoUpArgs {
         let result = demo::demo_up_services(
             &config_path,
             &demo_config,
-            dev_settings,
             cloudflared,
             &restart,
             provider_options,
@@ -3197,6 +2484,7 @@ impl DemoPolicyArgs {
 impl DemoWizardArgs {
     fn run(self) -> anyhow::Result<()> {
         let mode: wizard::WizardMode = self.mode.into();
+        let effective_locale = self.locale.clone().unwrap_or_else(detect_system_locale_tag);
         let provider_registry_ref = self
             .provider_registry
             .clone()
@@ -3225,13 +2513,19 @@ impl DemoWizardArgs {
             .iter()
             .map(|entry| entry.id.clone())
             .collect::<Vec<_>>();
-        let prefilled_answers = build_prefilled_wizard_answers_from_cli(&self);
+        let prefilled_answers = build_prefilled_wizard_answers_from_cli(&self, &effective_locale);
         let mut answers = if let Some(path) = self.qa_answers.as_ref() {
             load_wizard_qa_answers(path)?
         } else {
-            run_wizard_via_qa(mode, &self.locale, prefilled_answers, &qa_provider_ids)?
+            run_wizard_via_qa(
+                mode,
+                &effective_locale,
+                prefilled_answers,
+                &qa_provider_ids,
+                self.verbose,
+            )?
         };
-        merge_cli_overrides_into_wizard_answers(&mut answers, &self);
+        merge_cli_overrides_into_wizard_answers(&mut answers, &self, &effective_locale);
 
         let bundle = self
             .bundle
@@ -3313,7 +2607,7 @@ impl DemoWizardArgs {
         if merged_targets.is_empty() {
             tenants.push(wizard::TenantSelection {
                 tenant: if self.tenant == "demo" {
-                    answers.tenant.unwrap_or(self.tenant.clone())
+                    answers.tenant.clone().unwrap_or(self.tenant.clone())
                 } else {
                     self.tenant.clone()
                 },
@@ -3336,13 +2630,17 @@ impl DemoWizardArgs {
         let packs_remove = normalize_pack_removes(&answers.packs_remove)?;
         let providers_remove = normalize_provider_ids(&answers.providers_remove);
         let tenants_remove = normalize_target_selections(&answers.tenants_remove);
-        let access_changes = build_access_changes(
-            mode,
-            answers.access_mode.as_deref(),
-            &tenants,
-            &refs,
-            normalize_access_changes(&answers.access_change),
-        )?;
+        let access_changes = if mode == wizard::WizardMode::Create {
+            normalize_access_changes_from_pack_refs(&answers.pack_refs, &tenants)?
+        } else {
+            build_access_changes(
+                mode,
+                answers.access_mode.as_deref(),
+                &tenants,
+                &refs,
+                normalize_access_changes(&answers.access_change),
+            )?
+        };
         let default_assignments = normalize_default_assignments_from_pack_refs(&answers.pack_refs)?;
 
         let request = wizard::WizardCreateRequest {
@@ -3375,18 +2673,73 @@ impl DemoWizardArgs {
         if self.verbose {
             for step in &plan.steps {
                 if step.details.is_empty() {
-                    println!("step details {:?}: <none>", step.kind);
+                    println!(
+                        "{}",
+                        operator_i18n::trf(
+                            "cli.wizard.step_details_none",
+                            "step details {:?}: <none>",
+                            &[&format!("{:?}", step.kind)]
+                        )
+                    );
                     continue;
                 }
-                println!("step details {:?}:", step.kind);
+                println!(
+                    "{}",
+                    operator_i18n::trf(
+                        "cli.wizard.step_details_header",
+                        "step details {:?}:",
+                        &[&format!("{:?}", step.kind)]
+                    )
+                );
                 for (key, value) in &step.details {
-                    println!("  {}={}", key, value);
+                    println!(
+                        "{}",
+                        operator_i18n::trf(
+                            "cli.wizard.step_details_item",
+                            "  {}={}",
+                            &[key, value]
+                        )
+                    );
                 }
             }
         }
 
         if !execute_requested {
+            let output_path = prompt_output_answers_path()?;
+            let payload =
+                serde_json::to_string_pretty(&answers).context("serialize wizard answers")?;
+            std::fs::write(&output_path, payload)
+                .with_context(|| format!("write wizard answers {}", output_path.display()))?;
+            println!(
+                "{} {}",
+                operator_i18n::tr("cli.wizard.saved_answers", "saved wizard answers:"),
+                output_path.display()
+            );
             return Ok(());
+        }
+
+        if mode == wizard::WizardMode::Create
+            && bundle.exists()
+            && !prompt_yes_no(
+                &format!(
+                    "Bundle path {} already exists. Overwrite bundle? [y, N]",
+                    bundle.display()
+                ),
+                false,
+            )?
+        {
+            println!(
+                "{}",
+                operator_i18n::tr(
+                    "cli.wizard.execution_aborted",
+                    "wizard execution aborted by user"
+                )
+            );
+            return Ok(());
+        }
+        if mode == wizard::WizardMode::Create && bundle.exists() {
+            std::fs::remove_dir_all(&bundle)
+                .with_context(|| format!("remove existing bundle {}", bundle.display()))?;
         }
 
         let report = wizard_executor::execute(mode, &plan, self.offline)?;
@@ -3396,18 +2749,34 @@ impl DemoWizardArgs {
             .filter(|step| step.kind == wizard::WizardStepKind::NoOp)
             .count();
         println!(
-            "wizard execute complete bundle={} packs={} manifests={} providers={} no_ops={}",
-            report.bundle.display(),
-            report.resolved_packs.len(),
-            report.resolved_manifests.len(),
-            report.provider_updates,
-            no_op_count
+            "{}",
+            operator_i18n::trf(
+                "cli.wizard.execute_complete",
+                "wizard execute complete bundle={} packs={} manifests={} providers={} no_ops={}",
+                &[
+                    &report.bundle.display().to_string(),
+                    &report.resolved_packs.len().to_string(),
+                    &report.resolved_manifests.len().to_string(),
+                    &report.provider_updates.to_string(),
+                    &no_op_count.to_string()
+                ]
+            )
         );
         for manifest in &report.resolved_manifests {
-            println!("resolved manifest: {}", manifest.display());
+            println!(
+                "{}",
+                operator_i18n::trf(
+                    "cli.wizard.resolved_manifest",
+                    "resolved manifest: {}",
+                    &[&manifest.display().to_string()]
+                )
+            );
         }
         for warning in &report.warnings {
-            println!("warning: {warning}");
+            println!(
+                "{}",
+                operator_i18n::trf("cli.wizard.warning", "warning: {}", &[warning])
+            );
         }
 
         if self.run_setup && mode != wizard::WizardMode::Remove {
@@ -3443,7 +2812,10 @@ impl DemoWizardArgs {
                 )?;
             }
         } else if self.run_setup && mode == wizard::WizardMode::Remove {
-            println!("skip setup for remove mode");
+            println!(
+                "{}",
+                operator_i18n::tr("cli.wizard.skip_setup_remove", "skip setup for remove mode")
+            );
         }
         Ok(())
     }
@@ -3466,6 +2838,62 @@ fn parse_wizard_target(input: &str) -> anyhow::Result<(String, Option<String>)> 
     Ok((tenant, team))
 }
 
+fn prompt_output_answers_path() -> anyhow::Result<PathBuf> {
+    print!(
+        "{} ",
+        operator_i18n::tr(
+            "cli.wizard.answers_output_prompt",
+            "Answers output file [answers.json]:"
+        )
+    );
+    io::stdout().flush().context("flush stdout")?;
+    let mut input = String::new();
+    let read = io::stdin()
+        .read_line(&mut input)
+        .context("read answers output file path")?;
+    if read == 0 {
+        return Err(anyhow!("stdin closed"));
+    }
+    let trimmed = input.trim();
+    if trimmed.is_empty() {
+        return Ok(PathBuf::from("answers.json"));
+    }
+    Ok(PathBuf::from(trimmed))
+}
+
+fn prompt_yes_no(prompt: &str, default_yes: bool) -> anyhow::Result<bool> {
+    loop {
+        print!("{prompt} ");
+        io::stdout().flush().context("flush stdout")?;
+        let mut input = String::new();
+        let read = io::stdin()
+            .read_line(&mut input)
+            .context("read yes/no input")?;
+        if read == 0 {
+            return Err(anyhow!("stdin closed"));
+        }
+        let normalized = input.trim().to_ascii_lowercase();
+        if normalized.is_empty() {
+            return Ok(default_yes);
+        }
+        if let Some(value) = parse_yes_no_token(&normalized) {
+            return Ok(value);
+        }
+        println!(
+            "{}",
+            operator_i18n::tr("cli.common.answer_yes_no", "please answer y or n")
+        );
+    }
+}
+
+fn parse_yes_no_token(token: &str) -> Option<bool> {
+    match token {
+        "y" | "yes" | "j" | "ja" => Some(true),
+        "n" | "no" | "nee" | "nein" => Some(false),
+        _ => None,
+    }
+}
+
 fn load_wizard_qa_answers(path: &Path) -> anyhow::Result<WizardQaAnswers> {
     let raw = std::fs::read_to_string(path)
         .with_context(|| format!("read qa answers {}", path.display()))?;
@@ -3484,6 +2912,7 @@ fn run_wizard_via_qa(
     locale: &str,
     initial_answers: JsonValue,
     provider_ids: &[String],
+    verbose: bool,
 ) -> anyhow::Result<WizardQaAnswers> {
     let spec = wizard_spec_builder::build_validation_form_with_providers(mode, provider_ids);
     let prefilled_answers = initial_answers.clone();
@@ -3496,7 +2925,7 @@ fn run_wizard_via_qa(
             resolved: Some(load_wizard_i18n(locale)?),
             debug: false,
         },
-        verbose: false,
+        verbose,
     };
     let interactive = io::stdin().is_terminal() && io::stdout().is_terminal();
     let result = if interactive {
@@ -3521,38 +2950,42 @@ fn run_wizard_via_qa(
                     anyhow!("wizard QA flow failed (greentic-qa-lib): missing next_question_id")
                 })?
                 .to_string();
-            let mut patch = JsonMap::new();
-            patch.insert(
-                question_id.clone(),
-                answer_for_question(&prefilled_answers, &ui, &question_id)?,
-            );
-            loop {
-                let submit = driver
-                    .submit_patch_json(&JsonValue::Object(patch.clone()).to_string())
-                    .map_err(|err| anyhow!("wizard QA flow failed (greentic-qa-lib): {err}"))?;
-                if submit.status != "error" {
-                    break;
-                }
-                let response: JsonValue = serde_json::from_str(&submit.response_json)
-                    .with_context(
-                        || "wizard QA flow failed (greentic-qa-lib): parse validation response",
-                    )?;
-                let missing_required = extract_missing_required(&response);
-                if missing_required.is_empty() {
-                    return Err(anyhow!(
-                        "wizard QA flow failed (greentic-qa-lib): validation failed: {}",
-                        submit.response_json
-                    ));
-                }
-                for missing in missing_required {
-                    if patch.contains_key(&missing) {
-                        continue;
-                    }
-                    patch.insert(
-                        missing.clone(),
-                        answer_for_question(&prefilled_answers, &ui, &missing)?,
+            let answer = answer_for_question(&prefilled_answers, &ui, &question_id)?;
+            if verbose {
+                eprintln!(
+                    "{}",
+                    operator_i18n::trf(
+                        "cli.wizard.qa.submitting_answer",
+                        "wizard qa: submitting answer [{}]",
+                        &[&question_id]
+                    )
+                );
+                let _ = io::stderr().flush();
+            }
+            let submit = driver
+                .submit_patch_json(&json!({ question_id: answer }).to_string())
+                .map_err(|err| anyhow!("wizard QA flow failed (greentic-qa-lib): {err}"))?;
+            if submit.status == "error" {
+                if verbose {
+                    eprintln!(
+                        "{}",
+                        operator_i18n::tr(
+                            "cli.wizard.qa.submit_validation_error",
+                            "wizard qa: submit returned validation error"
+                        )
                     );
+                    let _ = io::stderr().flush();
                 }
+            } else if verbose {
+                eprintln!(
+                    "{}",
+                    operator_i18n::trf(
+                        "cli.wizard.qa.submit_accepted",
+                        "wizard qa: submit accepted (status={})",
+                        &[&submit.status]
+                    )
+                );
+                let _ = io::stderr().flush();
             }
         }
         driver
@@ -3612,21 +3045,6 @@ fn question_for_id<'a>(ui: &'a JsonValue, question_id: &str) -> anyhow::Result<&
         })
 }
 
-fn extract_missing_required(response: &JsonValue) -> Vec<String> {
-    response
-        .get("validation")
-        .and_then(|validation| validation.get("missing_required"))
-        .and_then(JsonValue::as_array)
-        .map(|values| {
-            values
-                .iter()
-                .filter_map(JsonValue::as_str)
-                .map(ToString::to_string)
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default()
-}
-
 fn prompt_for_wizard_answer(
     question_id: &str,
     question: &JsonValue,
@@ -3647,7 +3065,7 @@ fn prompt_for_wizard_answer(
     match kind {
         "string" => prompt_string_value(title, required),
         "enum" => prompt_enum_value(question_id, title, required, question),
-        "list" => prompt_list_value(title, required, question),
+        "list" => prompt_list_value(question_id, title, required, question),
         _ => prompt_string_value(title, required),
     }
 }
@@ -3668,7 +3086,10 @@ fn prompt_string_value(title: &str, required: bool) -> Result<JsonValue, QaLibEr
         let trimmed = input.trim();
         if trimmed.is_empty() {
             if required {
-                println!("value is required");
+                println!(
+                    "{}",
+                    operator_i18n::tr("cli.qa.value_required", "value is required")
+                );
                 continue;
             }
             return Ok(JsonValue::Null);
@@ -3699,7 +3120,10 @@ fn prompt_enum_value(
         for (idx, choice) in choices.iter().enumerate() {
             println!("  {}. {}", idx + 1, enum_choice_label(question_id, choice));
         }
-        print!("Select number or value: ");
+        print!(
+            "{} ",
+            operator_i18n::tr("cli.qa.select_number_or_value", "Select number or value:")
+        );
         io::stdout()
             .flush()
             .map_err(|err| QaLibError::Component(err.to_string()))?;
@@ -3713,7 +3137,10 @@ fn prompt_enum_value(
         let trimmed = input.trim();
         if trimmed.is_empty() {
             if required {
-                println!("value is required");
+                println!(
+                    "{}",
+                    operator_i18n::tr("cli.qa.value_required", "value is required")
+                );
                 continue;
             }
             return Ok(JsonValue::Null);
@@ -3727,11 +3154,15 @@ fn prompt_enum_value(
         if choices.iter().any(|choice| choice == trimmed) {
             return Ok(JsonValue::String(trimmed.to_string()));
         }
-        println!("invalid choice");
+        println!(
+            "{}",
+            operator_i18n::tr("cli.qa.invalid_choice", "invalid choice")
+        );
     }
 }
 
 fn prompt_list_value(
+    question_id: &str,
     title: &str,
     required: bool,
     question: &JsonValue,
@@ -3742,11 +3173,31 @@ fn prompt_list_value(
         .and_then(JsonValue::as_array)
         .ok_or_else(|| QaLibError::MissingField("list.fields".to_string()))?;
 
+    let custom_prompt = custom_list_add_prompt(question_id);
     println!("{title}:");
-    println!("Press Enter on 'Add item?' to finish.");
+    if custom_prompt.is_none() {
+        println!(
+            "{}",
+            operator_i18n::tr(
+                "cli.qa.list_finish_hint",
+                "Press Enter on 'Add item?' to finish."
+            )
+        );
+    }
     let mut items = Vec::new();
     loop {
-        print!("Add item #{}? [y/N]: ", items.len() + 1);
+        if let Some((prompt, _default_yes)) = custom_prompt.as_ref() {
+            print!("{prompt} ");
+        } else {
+            print!(
+                "{} ",
+                operator_i18n::trf(
+                    "cli.qa.add_item_prompt",
+                    "Add item #{}? [y/N]:",
+                    &[&(items.len() + 1).to_string()]
+                )
+            );
+        }
         io::stdout()
             .flush()
             .map_err(|err| QaLibError::Component(err.to_string()))?;
@@ -3758,12 +3209,36 @@ fn prompt_list_value(
             return Err(QaLibError::Component("stdin closed".to_string()));
         }
         let add = add.trim().to_ascii_lowercase();
-        if add.is_empty() || add == "n" || add == "no" {
-            break;
-        }
-        if add != "y" && add != "yes" {
-            println!("please answer y or n");
-            continue;
+        if let Some((_, default_yes)) = custom_prompt.as_ref() {
+            if add.is_empty() {
+                if !*default_yes {
+                    break;
+                }
+            } else if let Some(value) = parse_yes_no_token(&add) {
+                if !value {
+                    break;
+                }
+            } else {
+                println!(
+                    "{}",
+                    operator_i18n::tr("cli.common.answer_yes_no", "please answer y or n")
+                );
+                continue;
+            }
+        } else {
+            if add.is_empty() {
+                break;
+            }
+            let Some(value) = parse_yes_no_token(&add) else {
+                println!(
+                    "{}",
+                    operator_i18n::tr("cli.common.answer_yes_no", "please answer y or n")
+                );
+                continue;
+            };
+            if !value {
+                break;
+            }
         }
 
         let mut item = JsonMap::new();
@@ -3772,10 +3247,16 @@ fn prompt_list_value(
                 .get("id")
                 .and_then(JsonValue::as_str)
                 .ok_or_else(|| QaLibError::MissingField("id".to_string()))?;
-            let field_title = field
+            if should_skip_pack_ref_field(field_id, &item) {
+                continue;
+            }
+            let field_title_fallback = field
                 .get("title")
                 .and_then(JsonValue::as_str)
                 .unwrap_or(field_id);
+            let field_title_owned =
+                localized_list_field_title(question_id, field_id, field_title_fallback);
+            let field_title = field_title_owned.as_str();
             let field_kind = field
                 .get("type")
                 .and_then(JsonValue::as_str)
@@ -3784,9 +3265,13 @@ fn prompt_list_value(
                 .get("required")
                 .and_then(JsonValue::as_bool)
                 .unwrap_or(false);
-            let value = match field_kind {
-                "enum" => prompt_enum_value(field_id, field_title, field_required, field)?,
-                _ => prompt_string_value(field_title, field_required)?,
+            let value = if field_id == "make_default_pack" {
+                prompt_yes_no_value(field_title, false)?
+            } else {
+                match field_kind {
+                    "enum" => prompt_enum_value(field_id, field_title, field_required, field)?,
+                    _ => prompt_string_value(field_title, field_required)?,
+                }
             };
             if !value.is_null() {
                 item.insert(field_id.to_string(), value);
@@ -3796,23 +3281,140 @@ fn prompt_list_value(
     }
 
     if required && items.is_empty() {
-        println!("at least one item is required");
-        return prompt_list_value(title, required, question);
+        println!(
+            "{}",
+            operator_i18n::tr("cli.qa.at_least_one_item", "at least one item is required")
+        );
+        return prompt_list_value(question_id, title, required, question);
     }
     Ok(JsonValue::Array(items))
 }
 
 fn enum_choice_label<'a>(question_id: &str, choice: &'a str) -> Cow<'a, str> {
     match (question_id, choice) {
-        ("access_mode", "all_selected_get_all_packs") => {
-            Cow::Borrowed("All tenants and teams get access to all packs")
-        }
-        ("access_mode", "per_pack_matrix") => Cow::Borrowed("Fine-grained access control"),
+        ("access_mode", "all_selected_get_all_packs") => Cow::Owned(operator_i18n::tr(
+            "cli.qa.choice.access_mode.all_selected_get_all_packs",
+            "All tenants and teams get access to all packs",
+        )),
+        ("access_mode", "per_pack_matrix") => Cow::Owned(operator_i18n::tr(
+            "cli.qa.choice.access_mode.per_pack_matrix",
+            "Fine-grained access control",
+        )),
+        ("access_scope", "all_tenants") => Cow::Owned(operator_i18n::tr(
+            "cli.qa.choice.access_scope.all_tenants",
+            "all tenant",
+        )),
+        ("access_scope", "tenant_all_teams") => Cow::Owned(operator_i18n::tr(
+            "cli.qa.choice.access_scope.tenant_all_teams",
+            "all teams from a specific tenant",
+        )),
+        ("access_scope", "specific_team") => Cow::Owned(operator_i18n::tr(
+            "cli.qa.choice.access_scope.specific_team",
+            "specific team for a specific tenant",
+        )),
         _ => Cow::Borrowed(choice),
     }
 }
 
-fn build_prefilled_wizard_answers_from_cli(args: &DemoWizardArgs) -> JsonValue {
+fn should_skip_pack_ref_field(field_id: &str, item: &JsonMap<String, JsonValue>) -> bool {
+    let scope = item
+        .get("access_scope")
+        .and_then(JsonValue::as_str)
+        .unwrap_or_default();
+    match field_id {
+        "tenant_id" => scope != "tenant_all_teams" && scope != "specific_team",
+        "team_id" => scope != "specific_team",
+        _ => false,
+    }
+}
+
+fn localized_list_field_title(question_id: &str, field_id: &str, fallback: &str) -> String {
+    match (question_id, field_id) {
+        ("pack_refs", "pack_ref") => operator_i18n::tr(
+            "cli.qa.pack_ref_field_title",
+            "Pack reference (e.g. /path/to/app.gtpack, file://..., oci://ghcr.io/..., repo://..., store://...)",
+        ),
+        ("pack_refs", "access_scope") => operator_i18n::tr(
+            "cli.qa.pack_ref.access_scope_title",
+            "Who can access this application?",
+        ),
+        ("pack_refs", "tenant_id") => operator_i18n::tr(
+            "cli.qa.pack_ref.tenant_id_title",
+            "What is the tenant id who can access this application?",
+        ),
+        ("pack_refs", "team_id") => operator_i18n::tr(
+            "cli.qa.pack_ref.team_id_title",
+            "What is the team id who can access this application?",
+        ),
+        ("pack_refs", "make_default_pack") => operator_i18n::tr(
+            "cli.qa.pack_ref.make_default_pack_title",
+            "Is this pack the default pack when no pack is specified?",
+        ),
+        _ => fallback.to_string(),
+    }
+}
+
+fn prompt_yes_no_value(title: &str, default_yes: bool) -> Result<JsonValue, QaLibError> {
+    loop {
+        let suffix = if default_yes {
+            operator_i18n::tr("cli.qa.yes_no_suffix_default_yes", "[Y,n]")
+        } else {
+            operator_i18n::tr("cli.qa.yes_no_suffix_default_no", "[y,N]")
+        };
+        if title.contains("[y, N]") || title.contains("[Y,n]") || title.contains("[y,N]") {
+            print!("{title} ");
+        } else {
+            print!("{title} {suffix}: ");
+        }
+        io::stdout()
+            .flush()
+            .map_err(|err| QaLibError::Component(err.to_string()))?;
+        let mut input = String::new();
+        let read = io::stdin()
+            .read_line(&mut input)
+            .map_err(|err| QaLibError::Component(err.to_string()))?;
+        if read == 0 {
+            return Err(QaLibError::Component("stdin closed".to_string()));
+        }
+        let normalized = input.trim().to_ascii_lowercase();
+        let yes = if normalized.is_empty() {
+            default_yes
+        } else if let Some(value) = parse_yes_no_token(&normalized) {
+            value
+        } else {
+            println!(
+                "{}",
+                operator_i18n::tr("cli.common.answer_yes_no", "please answer y or n")
+            );
+            continue;
+        };
+        return Ok(JsonValue::String(
+            if yes { "yes" } else { "no" }.to_string(),
+        ));
+    }
+}
+
+fn custom_list_add_prompt(question_id: &str) -> Option<(String, bool)> {
+    match question_id {
+        "pack_refs" => Some((
+            operator_i18n::tr(
+                "cli.qa.pack_refs.add_prompt",
+                "Do you want to add an application pack? [Y,n]",
+            ),
+            true,
+        )),
+        "providers" => Some((
+            operator_i18n::tr(
+                "cli.qa.providers.add_prompt",
+                "Do you want to add providers (e.g. messaging, events, etc)? [Y,n]",
+            ),
+            true,
+        )),
+        _ => None,
+    }
+}
+
+fn build_prefilled_wizard_answers_from_cli(args: &DemoWizardArgs, locale: &str) -> JsonValue {
     let mut map = JsonMap::new();
     if let Some(bundle) = args.bundle.as_ref() {
         map.insert(
@@ -3820,6 +3422,7 @@ fn build_prefilled_wizard_answers_from_cli(args: &DemoWizardArgs) -> JsonValue {
             JsonValue::String(bundle.display().to_string()),
         );
     }
+    map.insert("locale".to_string(), JsonValue::String(locale.to_string()));
     if !args.pack_refs.is_empty() {
         let values = args
             .pack_refs
@@ -3866,13 +3469,17 @@ fn build_prefilled_wizard_answers_from_cli(args: &DemoWizardArgs) -> JsonValue {
     } else if args.dry_run {
         map.insert(
             "execution_mode".to_string(),
-            JsonValue::String("dry_run".to_string()),
+            JsonValue::String("dry run".to_string()),
         );
     }
     JsonValue::Object(map)
 }
 
-fn merge_cli_overrides_into_wizard_answers(answers: &mut WizardQaAnswers, args: &DemoWizardArgs) {
+fn merge_cli_overrides_into_wizard_answers(
+    answers: &mut WizardQaAnswers,
+    args: &DemoWizardArgs,
+    locale: &str,
+) {
     if let Some(bundle) = args.bundle.clone() {
         answers.bundle = Some(bundle);
     }
@@ -3906,9 +3513,15 @@ fn merge_cli_overrides_into_wizard_answers(answers: &mut WizardQaAnswers, args: 
     if args.team.is_some() {
         answers.team = args.team.clone();
     }
-    if args.locale != "en-GB" || answers.locale.is_none() {
-        answers.locale = Some(args.locale.clone());
+    if let Some(value) = args.locale.as_ref() {
+        answers.locale = Some(value.clone());
+    } else if answers.locale.is_none() {
+        answers.locale = Some(locale.to_string());
     }
+}
+
+fn detect_system_locale_tag() -> String {
+    operator_i18n::select_locale(None)
 }
 
 fn parse_local_registry_ref(reference: &str) -> Option<PathBuf> {
@@ -3943,43 +3556,137 @@ fn normalize_default_assignments_from_pack_refs(
     for value in values {
         let WizardPackRefAnswer::Item {
             pack_ref,
+            access_scope,
+            make_default_pack,
             tenant_id,
             team_id,
-            make_default_scope,
         } = value
         else {
             continue;
         };
-        let Some(scope_raw) = make_default_scope.as_deref().map(str::trim) else {
+        let make_default = make_default_pack
+            .as_deref()
+            .map(str::trim)
+            .map(|value| value.eq_ignore_ascii_case("y") || value.eq_ignore_ascii_case("yes"))
+            .unwrap_or(false);
+        if !make_default {
             continue;
-        };
-        let scope = match scope_raw {
-            "" | "none" => continue,
-            "global" => wizard::PackScope::Global,
-            "tenant" => {
+        }
+        let scope = match access_scope.as_deref().map(str::trim) {
+            None | Some("") | Some("all_tenants") => wizard::PackScope::Global,
+            Some("tenant_all_teams") => {
                 let tenant_id = tenant_id
                     .clone()
                     .filter(|value| !value.trim().is_empty())
-                    .ok_or_else(|| anyhow!("make_default_scope=tenant requires tenant_id"))?;
+                    .ok_or_else(|| anyhow!("access_scope=tenant_all_teams requires tenant_id"))?;
                 wizard::PackScope::Tenant { tenant_id }
             }
-            "team" => {
+            Some("specific_team") => {
                 let tenant_id = tenant_id
                     .clone()
                     .filter(|value| !value.trim().is_empty())
-                    .ok_or_else(|| anyhow!("make_default_scope=team requires tenant_id"))?;
+                    .ok_or_else(|| anyhow!("access_scope=specific_team requires tenant_id"))?;
                 let team_id = team_id
                     .clone()
                     .filter(|value| !value.trim().is_empty())
-                    .ok_or_else(|| anyhow!("make_default_scope=team requires team_id"))?;
+                    .ok_or_else(|| anyhow!("access_scope=specific_team requires team_id"))?;
                 wizard::PackScope::Team { tenant_id, team_id }
             }
-            other => return Err(anyhow!("unsupported make_default_scope {other}")),
+            Some(other) => return Err(anyhow!("unsupported access_scope {other}")),
         };
         out.push(wizard::PackDefaultSelection {
             pack_identifier: pack_ref.clone(),
             scope,
         });
+    }
+    Ok(out)
+}
+
+fn normalize_access_changes_from_pack_refs(
+    values: &[WizardPackRefAnswer],
+    tenants: &[wizard::TenantSelection],
+) -> anyhow::Result<Vec<wizard::AccessChangeSelection>> {
+    let mut seen = BTreeSet::new();
+    let mut out = Vec::new();
+    for value in values {
+        let (pack_ref, scope, tenant_id, team_id) = match value {
+            WizardPackRefAnswer::Ref(pack_ref) => (pack_ref, "all_tenants", None, None),
+            WizardPackRefAnswer::Item {
+                pack_ref,
+                access_scope,
+                tenant_id,
+                team_id,
+                ..
+            } => (
+                pack_ref,
+                access_scope.as_deref().unwrap_or("all_tenants"),
+                tenant_id.as_deref(),
+                team_id.as_deref(),
+            ),
+        };
+        let pack_ref = pack_ref.trim();
+        if pack_ref.is_empty() {
+            continue;
+        }
+        match scope {
+            "all_tenants" | "" => {
+                for target in tenants {
+                    let key = (
+                        pack_ref.to_string(),
+                        target.tenant.clone(),
+                        target.team.clone().unwrap_or_default(),
+                    );
+                    if !seen.insert(key) {
+                        continue;
+                    }
+                    out.push(wizard::AccessChangeSelection {
+                        pack_id: pack_ref.to_string(),
+                        operation: wizard::AccessOperation::AllowAdd,
+                        tenant_id: target.tenant.clone(),
+                        team_id: target.team.clone(),
+                    });
+                }
+            }
+            "tenant_all_teams" => {
+                let tenant_id = tenant_id
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .ok_or_else(|| anyhow!("access_scope=tenant_all_teams requires tenant_id"))?;
+                let key = (pack_ref.to_string(), tenant_id.to_string(), String::new());
+                if seen.insert(key) {
+                    out.push(wizard::AccessChangeSelection {
+                        pack_id: pack_ref.to_string(),
+                        operation: wizard::AccessOperation::AllowAdd,
+                        tenant_id: tenant_id.to_string(),
+                        team_id: None,
+                    });
+                }
+            }
+            "specific_team" => {
+                let tenant_id = tenant_id
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .ok_or_else(|| anyhow!("access_scope=specific_team requires tenant_id"))?;
+                let team_id = team_id
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .ok_or_else(|| anyhow!("access_scope=specific_team requires team_id"))?;
+                let key = (
+                    pack_ref.to_string(),
+                    tenant_id.to_string(),
+                    team_id.to_string(),
+                );
+                if seen.insert(key) {
+                    out.push(wizard::AccessChangeSelection {
+                        pack_id: pack_ref.to_string(),
+                        operation: wizard::AccessOperation::AllowAdd,
+                        tenant_id: tenant_id.to_string(),
+                        team_id: Some(team_id.to_string()),
+                    });
+                }
+            }
+            other => return Err(anyhow!("unsupported access_scope {other}")),
+        }
     }
     Ok(out)
 }
@@ -4256,22 +3963,7 @@ fn build_access_changes(
 }
 
 fn load_wizard_i18n(locale: &str) -> anyhow::Result<ResolvedI18nMap> {
-    let requested = PathBuf::from("i18n")
-        .join("operator_wizard")
-        .join(format!("{locale}.json"));
-    let fallback = PathBuf::from("i18n")
-        .join("operator_wizard")
-        .join("en-GB.json");
-    let path = if requested.exists() {
-        requested
-    } else if fallback.exists() {
-        fallback
-    } else {
-        return Ok(ResolvedI18nMap::new());
-    };
-    let raw = std::fs::read_to_string(&path)
-        .with_context(|| format!("read wizard i18n map {}", path.display()))?;
-    serde_json::from_str(&raw).with_context(|| format!("parse wizard i18n map {}", path.display()))
+    wizard_i18n::load(locale)
 }
 
 fn run_wizard_setup_for_target(
@@ -4590,17 +4282,21 @@ impl DemoSendArgs {
             send_value,
         )
         .context("send_payload failed")?;
-        println!("ok");
+        println!("{}", operator_i18n::tr("cli.common.ok", "ok"));
+        let status = if send_outcome.success {
+            operator_i18n::tr("cli.common.success", "success")
+        } else {
+            operator_i18n::tr("cli.common.failed", "failed")
+        };
         println!(
-            "Flow result: {}",
-            if send_outcome.success {
-                "success"
-            } else {
-                "failed"
-            }
+            "{}",
+            operator_i18n::trf("cli.demo_send.flow_result", "Flow result: {}", &[&status])
         );
         if let Some(error) = &send_outcome.error {
-            println!("Flow error: {error}");
+            println!(
+                "{}",
+                operator_i18n::trf("cli.demo_send.flow_error", "Flow error: {}", &[error])
+            );
         }
         if let Some(value) = send_outcome.output {
             if let Ok(parsed) = serde_json::from_value::<SendPayloadOutV1>(value.clone()) {
@@ -4608,10 +4304,21 @@ impl DemoSendArgs {
             } else if demo_debug_enabled() {
                 if let Ok(body) = serde_json::to_string_pretty(&value) {
                     println!(
-                        "[demo] after send_payload output: failed to parse SendPayloadOutV1\n{body}"
+                        "{}",
+                        operator_i18n::trf(
+                            "cli.demo_send.debug_parse_send_payload_failed",
+                            "[demo] after send_payload output: failed to parse SendPayloadOutV1\n{}",
+                            &[&body]
+                        )
                     );
                 } else {
-                    println!("[demo] after send_payload output: invalid JSON output");
+                    println!(
+                        "{}",
+                        operator_i18n::tr(
+                            "cli.demo_send.debug_invalid_json_output",
+                            "[demo] after send_payload output: invalid JSON output"
+                        )
+                    );
                 }
             }
             let missing_uris = if payload_contains_secret_error(&value) {
@@ -4631,12 +4338,16 @@ impl DemoSendArgs {
             };
             if !missing_uris.is_empty() {
                 println!(
-                    "missing secret URIs:\n{}",
-                    missing_uris
-                        .iter()
-                        .map(|uri| format!("  - {uri}"))
-                        .collect::<Vec<_>>()
-                        .join("\n")
+                    "{}",
+                    operator_i18n::trf(
+                        "cli.demo_send.missing_secret_uris",
+                        "missing secret URIs:\n{}",
+                        &[&missing_uris
+                            .iter()
+                            .map(|uri| format!("  - {uri}"))
+                            .collect::<Vec<_>>()
+                            .join("\n")]
+                    )
                 );
                 for uri in &missing_uris {
                     print_secret_missing_details(
@@ -4762,13 +4473,29 @@ fn print_secret_missing_details(
         (None, true) => "<env secrets store>".to_string(),
         (None, false) => default_store.display().to_string(),
     };
-    println!("Secret not found:");
-    println!("  uri: {uri}");
-    println!("  key: {key}");
-    println!("  store: {store_desc}");
     println!(
-        "hint: run `greentic-operator setup` or add the key to {}",
-        default_store.display()
+        "{}",
+        operator_i18n::tr("cli.secrets.not_found", "Secret not found:")
+    );
+    println!(
+        "{}",
+        operator_i18n::trf("cli.secrets.uri", "  uri: {}", &[uri])
+    );
+    println!(
+        "{}",
+        operator_i18n::trf("cli.secrets.key", "  key: {}", &[&key])
+    );
+    println!(
+        "{}",
+        operator_i18n::trf("cli.secrets.store", "  store: {}", &[&store_desc])
+    );
+    println!(
+        "{}",
+        operator_i18n::trf(
+            "cli.secrets.hint_setup_or_add_key",
+            "hint: run `greentic-operator setup` or add the key to {}",
+            &[&default_store.display().to_string()]
+        )
     );
 }
 
@@ -4852,14 +4579,27 @@ fn ensure_provider_op_success(
 }
 
 fn print_capability_outcome(outcome: &FlowOutcome) -> anyhow::Result<()> {
-    println!("success: {}", outcome.success);
+    println!(
+        "{}",
+        operator_i18n::trf(
+            "cli.capabilities.outcome.success",
+            "success: {}",
+            &[&outcome.success.to_string()]
+        )
+    );
     if let Some(error) = outcome.error.as_ref() {
-        println!("error: {}", error);
+        println!(
+            "{}",
+            operator_i18n::trf("cli.capabilities.outcome.error", "error: {}", &[error])
+        );
     }
     if let Some(raw) = outcome.raw.as_ref()
         && !raw.trim().is_empty()
     {
-        println!("raw:\n{raw}");
+        println!(
+            "{}",
+            operator_i18n::trf("cli.capabilities.outcome.raw", "raw:\n{}", &[raw])
+        );
     }
     if let Some(value) = outcome.output.as_ref() {
         println!("{}", serde_json::to_string_pretty(value)?);
@@ -5036,7 +4776,14 @@ impl DemoIngressArgs {
 
         if self.dlq_tail {
             let paths = RuntimePaths::new(self.bundle.join("state"), &self.tenant, &self.team);
-            println!("DLQ log location: {}", paths.dlq_log_path().display());
+            println!(
+                "{}",
+                operator_i18n::trf(
+                    "cli.ingress.dlq_log_location",
+                    "DLQ log location: {}",
+                    &[&paths.dlq_log_path().display().to_string()]
+                )
+            );
         }
         Ok(())
     }
@@ -5133,19 +4880,46 @@ fn derive_route_from_path(path: &str) -> Option<String> {
 fn print_http_response(
     response: &crate::messaging_universal::dto::HttpOutV1,
 ) -> anyhow::Result<()> {
-    println!("HTTP OUT: status {}", response.status);
+    println!(
+        "{}",
+        operator_i18n::trf(
+            "cli.ingress.http_out_status",
+            "HTTP OUT: status {}",
+            &[&response.status.to_string()]
+        )
+    );
     for (name, value) in &response.headers {
-        println!("  {}: {}", name, value);
+        println!(
+            "{}",
+            operator_i18n::trf("cli.ingress.http_header", "  {}: {}", &[name, value])
+        );
     }
     if let Some(body_b64) = &response.body_b64 {
         if let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(body_b64) {
             if let Ok(text) = std::str::from_utf8(&bytes) {
-                println!("  body: {}", text);
+                println!(
+                    "{}",
+                    operator_i18n::trf("cli.ingress.http_body", "  body: {}", &[text])
+                );
             } else {
-                println!("  body (base64): {}", body_b64);
+                println!(
+                    "{}",
+                    operator_i18n::trf(
+                        "cli.ingress.http_body_base64",
+                        "  body (base64): {}",
+                        &[body_b64]
+                    )
+                );
             }
         } else {
-            println!("  body (base64): {}", body_b64);
+            println!(
+                "{}",
+                operator_i18n::trf(
+                    "cli.ingress.http_body_base64",
+                    "  body (base64): {}",
+                    &[body_b64]
+                )
+            );
         }
     }
     Ok(())
@@ -5177,7 +4951,14 @@ impl DemoNewArgs {
             ));
         }
         create_demo_bundle_structure(&target)?;
-        println!("created demo bundle scaffold at {}", target.display());
+        println!(
+            "{}",
+            operator_i18n::trf(
+                "cli.demo_new.created_scaffold",
+                "created demo bundle scaffold at {}",
+                &[&target.display().to_string()]
+            )
+        );
         Ok(())
     }
 }
@@ -5448,22 +5229,16 @@ impl DemoLogsArgs {
 }
 
 impl DemoDoctorArgs {
-    fn run(self, ctx: &AppCtx) -> anyhow::Result<()> {
+    fn run(self, _ctx: &AppCtx) -> anyhow::Result<()> {
         let config = config::load_operator_config(&self.bundle)?;
-        let dev_settings =
-            resolve_dev_settings(&ctx.settings, config.as_ref(), &self.dev, &self.bundle)?;
         let explicit = config::binary_override(config.as_ref(), "greentic-pack", &self.bundle);
         let pack_command = bin_resolver::resolve_binary(
             "greentic-pack",
             &ResolveCtx {
                 config_dir: self.bundle.clone(),
-                dev: dev_settings.clone(),
                 explicit_path: explicit,
             },
         )?;
-        if dev_settings.is_some() {
-            println!("greentic-pack -> {} ✅", pack_command.display());
-        }
         if demo_debug_enabled() {
             println!(
                 "[demo] doctor bundle={} greentic-pack={}",
@@ -5799,47 +5574,6 @@ struct DemoResolvedManifest {
     providers: std::collections::BTreeMap<String, Vec<String>>,
 }
 
-fn resolve_dev_settings(
-    settings: &settings::OperatorSettings,
-    config: Option<&config::OperatorConfig>,
-    overrides: &DevModeArgs,
-    config_dir: &Path,
-) -> anyhow::Result<Option<DevSettingsResolved>> {
-    let global = settings.dev.to_dev_settings();
-    let merged = merge_settings(config.and_then(|cfg| cfg.dev.clone()), Some(global));
-    effective_dev_settings(overrides.to_overrides(), merged, config_dir)
-}
-
-impl DevModeArgs {
-    fn to_overrides(&self) -> DevCliOverrides {
-        DevCliOverrides {
-            mode: self.dev_mode.map(Into::into),
-            root: self.dev_root.clone(),
-            profile: self.dev_profile.map(Into::into),
-            target_dir: self.dev_target_dir.clone(),
-        }
-    }
-}
-
-impl From<DevModeArg> for DevMode {
-    fn from(value: DevModeArg) -> Self {
-        match value {
-            DevModeArg::Auto => DevMode::Auto,
-            DevModeArg::On => DevMode::On,
-            DevModeArg::Off => DevMode::Off,
-        }
-    }
-}
-
-impl From<DevProfileArg> for DevProfile {
-    fn from(value: DevProfileArg) -> Self {
-        match value {
-            DevProfileArg::Debug => DevProfile::Debug,
-            DevProfileArg::Release => DevProfile::Release,
-        }
-    }
-}
-
 impl From<WizardModeArg> for wizard::WizardMode {
     fn from(value: WizardModeArg) -> Self {
         match value {
@@ -5910,8 +5644,12 @@ fn run_domain_command(args: DomainRunArgs) -> anyhow::Result<()> {
         if !missing.is_empty() && !args.allow_missing_setup {
             if args.best_effort {
                 println!(
-                    "Best-effort: skipped {} pack(s) missing {setup_flow}.",
-                    missing.len()
+                    "{}",
+                    operator_i18n::trf(
+                        "cli.domain.best_effort_skipped_missing_setup",
+                        "Best-effort: skipped {} pack(s) missing {}.",
+                        &[&missing.len().to_string(), setup_flow]
+                    )
                 );
                 packs.retain(|pack| pack.entry_flows.iter().any(|flow| flow == setup_flow));
             } else {
@@ -5929,9 +5667,12 @@ fn run_domain_command(args: DomainRunArgs) -> anyhow::Result<()> {
         let missing = filter_packs_by_allowed(&mut packs, allowed);
         if !missing.is_empty() {
             println!(
-                "[warn] skip setup domain={} missing packs: {}",
-                domains::domain_name(args.domain),
-                missing.join(", ")
+                "{}",
+                operator_i18n::trf(
+                    "cli.domain.warn_skip_missing_packs",
+                    "[warn] skip setup domain={} missing packs: {}",
+                    &[domains::domain_name(args.domain), &missing.join(", ")]
+                )
             );
             operator_log::warn(
                 module_path!(),
@@ -5995,9 +5736,21 @@ fn run_domain_command(args: DomainRunArgs) -> anyhow::Result<()> {
 
     if plan.is_empty() {
         if is_demo_bundle {
-            println!("No provider packs matched. Try --provider <pack_id>.");
+            println!(
+                "{}",
+                operator_i18n::tr(
+                    "cli.domain.no_provider_packs_matched",
+                    "No provider packs matched. Try --provider <pack_id>."
+                )
+            );
         } else {
-            println!("No provider packs matched. Try --provider <pack_id> or --project-root.");
+            println!(
+                "{}",
+                operator_i18n::tr(
+                    "cli.domain.no_provider_packs_matched_or_project_root",
+                    "No provider packs matched. Try --provider <pack_id> or --project-root."
+                )
+            );
         }
         operator_log::warn(
             module_path!(),
@@ -6117,7 +5870,14 @@ fn run_plan(
             }
         }
         if best_effort && !errors.is_empty() {
-            println!("Best-effort: {} flow(s) failed.", errors.len());
+            println!(
+                "{}",
+                operator_i18n::trf(
+                    "cli.domain.best_effort_flows_failed",
+                    "Best-effort: {} flow(s) failed.",
+                    &[&errors.len().to_string()]
+                )
+            );
             return Ok(());
         }
         return Ok(());
@@ -6183,7 +5943,14 @@ fn run_plan(
     let errors = errors.lock().unwrap();
     if !errors.is_empty() {
         if best_effort {
-            println!("Best-effort: {} flow(s) failed.", errors.len());
+            println!(
+                "{}",
+                operator_i18n::trf(
+                    "cli.domain.best_effort_flows_failed",
+                    "Best-effort: {} flow(s) failed.",
+                    &[&errors.len().to_string()]
+                )
+            );
             return Ok(());
         }
         return Err(anyhow::anyhow!("{} flow(s) failed.", errors.len()));
@@ -6194,9 +5961,16 @@ fn run_plan(
 fn render_plan(plan: &[domains::PlannedRun], format: PlanFormat) -> anyhow::Result<()> {
     match format {
         PlanFormat::Text => {
-            println!("Plan:");
+            println!("{}", operator_i18n::tr("cli.domain.plan_header", "Plan:"));
             for item in plan {
-                println!("  {} -> {}", item.pack.file_name, item.flow_id);
+                println!(
+                    "{}",
+                    operator_i18n::trf(
+                        "cli.domain.plan_item",
+                        "  {} -> {}",
+                        &[&item.pack.file_name, &item.flow_id]
+                    )
+                );
             }
             Ok(())
         }
@@ -6258,20 +6032,34 @@ fn run_plan_item(
                     .collect::<Vec<_>>()
                     .join("\n");
                 println!(
-                    "[warn] skip setup domain={} tenant={} provider={}: missing secrets:\n{formatted}",
-                    domains::domain_name(domain),
-                    tenant,
-                    provider_id
+                    "{}",
+                    operator_i18n::trf(
+                        "cli.plan.warn_skip_missing_secrets",
+                        "[warn] skip setup domain={} tenant={} provider={}: missing secrets:\n{}",
+                        &[
+                            domains::domain_name(domain),
+                            tenant,
+                            &provider_id,
+                            &formatted
+                        ]
+                    )
                 );
                 return Ok(());
             }
             Ok(None) => {}
             Err(err) => {
                 println!(
-                    "[warn] skip setup domain={} tenant={} provider={}: secrets check failed: {err}",
-                    domains::domain_name(domain),
-                    tenant,
-                    provider_id
+                    "{}",
+                    operator_i18n::trf(
+                        "cli.plan.warn_skip_secrets_check_failed",
+                        "[warn] skip setup domain={} tenant={} provider={}: secrets check failed: {}",
+                        &[
+                            domains::domain_name(domain),
+                            tenant,
+                            &provider_id,
+                            &err.to_string()
+                        ]
+                    )
                 );
                 return Ok(());
             }
@@ -6435,14 +6223,32 @@ fn run_plan_item(
         }
         let exit = format_runner_exit(&output);
         if output.status.success() {
-            println!("{} {} -> {}", item.pack.file_name, item.flow_id, exit);
+            println!(
+                "{}",
+                operator_i18n::trf(
+                    "cli.plan.item_result_ok",
+                    "{} {} -> {}",
+                    &[&item.pack.file_name, &item.flow_id, &exit]
+                )
+            );
         } else if let Some(summary) = summarize_runner_error(&output) {
             println!(
-                "{} {} -> {} ({})",
-                item.pack.file_name, item.flow_id, exit, summary
+                "{}",
+                operator_i18n::trf(
+                    "cli.plan.item_result_error_with_summary",
+                    "{} {} -> {} ({})",
+                    &[&item.pack.file_name, &item.flow_id, &exit, &summary]
+                )
             );
         } else {
-            println!("{} {} -> {}", item.pack.file_name, item.flow_id, exit);
+            println!(
+                "{}",
+                operator_i18n::trf(
+                    "cli.plan.item_result_error",
+                    "{} {} -> {}",
+                    &[&item.pack.file_name, &item.flow_id, &exit]
+                )
+            );
         }
     } else {
         let output = runner_exec::run_provider_pack_flow(runner_exec::RunRequest {
@@ -6531,7 +6337,6 @@ fn resolve_demo_runner_binary(
         &name,
         &ResolveCtx {
             config_dir: config_dir.to_path_buf(),
-            dev: None,
             explicit_path: explicit,
         },
     )?;
@@ -6818,10 +6623,22 @@ fn debug_print_envelope(op_label: &str, envelope: &JsonValue) {
         return;
     }
     match serde_json::to_string_pretty(envelope) {
-        Ok(body) => println!("[demo] before {op_label} envelope:\n{body}"),
-        Err(err) => {
-            println!("[demo] before {op_label} envelope: failed to serialize envelope: {err}")
-        }
+        Ok(body) => println!(
+            "{}",
+            operator_i18n::trf(
+                "cli.demo.debug.before_envelope",
+                "[demo] before {} envelope:\n{}",
+                &[op_label, &body]
+            )
+        ),
+        Err(err) => println!(
+            "{}",
+            operator_i18n::trf(
+                "cli.demo.debug.before_envelope_serialize_failed",
+                "[demo] before {} envelope: failed to serialize envelope: {}",
+                &[op_label, &err.to_string()]
+            )
+        ),
     }
 }
 
@@ -6830,10 +6647,22 @@ fn debug_print_render_plan_output(output: &RenderPlanOutV1) {
         return;
     }
     match serde_json::to_string_pretty(&output) {
-        Ok(body) => println!("[demo] after render_plan output:\n{body}"),
-        Err(err) => {
-            println!("[demo] after render_plan output: failed to serialize output: {err}")
-        }
+        Ok(body) => println!(
+            "{}",
+            operator_i18n::trf(
+                "cli.demo.debug.after_render_plan",
+                "[demo] after render_plan output:\n{}",
+                &[&body]
+            )
+        ),
+        Err(err) => println!(
+            "{}",
+            operator_i18n::trf(
+                "cli.demo.debug.after_render_plan_serialize_failed",
+                "[demo] after render_plan output: failed to serialize output: {}",
+                &[&err.to_string()]
+            )
+        ),
     }
 }
 
@@ -6842,8 +6671,22 @@ fn debug_print_encode_input(input: &EncodeInV1) {
         return;
     }
     match serde_json::to_string_pretty(&input) {
-        Ok(body) => println!("[demo] encode input:\n{body}"),
-        Err(err) => println!("[demo] encode input: failed to serialize input: {err}"),
+        Ok(body) => println!(
+            "{}",
+            operator_i18n::trf(
+                "cli.demo.debug.encode_input",
+                "[demo] encode input:\n{}",
+                &[&body]
+            )
+        ),
+        Err(err) => println!(
+            "{}",
+            operator_i18n::trf(
+                "cli.demo.debug.encode_input_serialize_failed",
+                "[demo] encode input: failed to serialize input: {}",
+                &[&err.to_string()]
+            )
+        ),
     }
 }
 
@@ -6852,8 +6695,22 @@ fn debug_print_encode_output(output: &EncodeOutV1) {
         return;
     }
     match serde_json::to_string_pretty(&output) {
-        Ok(body) => println!("[demo] after encode output:\n{body}"),
-        Err(err) => println!("[demo] after encode output: failed to serialize output: {err}"),
+        Ok(body) => println!(
+            "{}",
+            operator_i18n::trf(
+                "cli.demo.debug.after_encode",
+                "[demo] after encode output:\n{}",
+                &[&body]
+            )
+        ),
+        Err(err) => println!(
+            "{}",
+            operator_i18n::trf(
+                "cli.demo.debug.after_encode_serialize_failed",
+                "[demo] after encode output: failed to serialize output: {}",
+                &[&err.to_string()]
+            )
+        ),
     }
 }
 
@@ -6862,8 +6719,22 @@ fn debug_print_send_payload_output(output: &SendPayloadOutV1) {
         return;
     }
     match serde_json::to_string_pretty(&output) {
-        Ok(body) => println!("[demo] after send_payload output:\n{body}"),
-        Err(err) => println!("[demo] after send_payload output: failed to serialize output: {err}"),
+        Ok(body) => println!(
+            "{}",
+            operator_i18n::trf(
+                "cli.demo.debug.after_send_payload",
+                "[demo] after send_payload output:\n{}",
+                &[&body]
+            )
+        ),
+        Err(err) => println!(
+            "{}",
+            operator_i18n::trf(
+                "cli.demo.debug.after_send_payload_serialize_failed",
+                "[demo] after send_payload output: failed to serialize output: {}",
+                &[&err.to_string()]
+            )
+        ),
     }
 }
 
@@ -7110,5 +6981,25 @@ mod tests {
         )
         .unwrap();
         assert_eq!(changes.len(), 2);
+    }
+
+    #[test]
+    fn parse_yes_no_token_accepts_english_and_dutch() {
+        assert_eq!(parse_yes_no_token("y"), Some(true));
+        assert_eq!(parse_yes_no_token("yes"), Some(true));
+        assert_eq!(parse_yes_no_token("j"), Some(true));
+        assert_eq!(parse_yes_no_token("ja"), Some(true));
+        assert_eq!(parse_yes_no_token("n"), Some(false));
+        assert_eq!(parse_yes_no_token("no"), Some(false));
+        assert_eq!(parse_yes_no_token("nee"), Some(false));
+        assert_eq!(parse_yes_no_token("nein"), Some(false));
+        assert_eq!(parse_yes_no_token("x"), None);
+    }
+
+    #[test]
+    fn localized_pack_ref_field_title_uses_i18n_key() {
+        let value = localized_list_field_title("pack_refs", "pack_ref", "fallback");
+        assert!(!value.is_empty());
+        assert_ne!(value, "fallback");
     }
 }

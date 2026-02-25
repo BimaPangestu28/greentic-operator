@@ -1,0 +1,16 @@
+{
+  "wizard.create.bundle_path": "Ruta de salida del paquete",
+  "wizard.create.bundle_name": "Nombre del paquete",
+  "wizard.create.locale": "Idioma",
+  "wizard.create.pack_refs": "Referencias de paquetes",
+  "wizard.create.providers": "Proveedores",
+  "wizard.create.targets": "Inquilinos y equipos",
+  "wizard.create.access_mode": "Modo de acceso",
+  "wizard.create.execution_mode": "Modo de ejecución",
+  "wizard.update.bundle_path": "Ruta del paquete",
+  "wizard.update.ops": "Operaciones de actualización",
+  "wizard.update.execution_mode": "Modo de ejecución",
+  "wizard.remove.bundle_path": "Ruta del paquete",
+  "wizard.remove.targets": "Objetivos a eliminar",
+  "wizard.remove.execution_mode": "Modo de ejecución"
+}

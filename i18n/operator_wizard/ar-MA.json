@@ -1,0 +1,16 @@
+{
+  "wizard.create.bundle_path": "مسار إخراج الحزمة",
+  "wizard.create.bundle_name": "اسم الحزمة",
+  "wizard.create.locale": "اللغة",
+  "wizard.create.pack_refs": "مراجع الحزم",
+  "wizard.create.providers": "المزوّدون",
+  "wizard.create.targets": "المستأجرون والفرق",
+  "wizard.create.access_mode": "وضع الوصول",
+  "wizard.create.execution_mode": "وضع التنفيذ",
+  "wizard.update.bundle_path": "مسار الحزمة",
+  "wizard.update.ops": "عمليات التحديث",
+  "wizard.update.execution_mode": "وضع التنفيذ",
+  "wizard.remove.bundle_path": "مسار الحزمة",
+  "wizard.remove.targets": "أهداف الإزالة",
+  "wizard.remove.execution_mode": "وضع التنفيذ"
+}

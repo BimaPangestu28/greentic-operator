@@ -1,5 +1,7 @@
 use std::path::Path;
 
+use crate::offers::{OfferRegistry, discover_gtpacks};
+
 pub fn demo_doctor(bundle_root: &Path, pack_command: &Path) -> anyhow::Result<()> {
     let packs_root = bundle_root.join("packs");
     if !packs_root.exists() {
@@ -22,6 +24,23 @@ pub fn demo_doctor(bundle_root: &Path, pack_command: &Path) -> anyhow::Result<()
                 pack.display()
             ));
         }
+    }
+
+    let discovered = discover_gtpacks(&packs_root)?;
+    let offers = OfferRegistry::from_pack_refs(&discovered)?;
+    println!(
+        "offer.registry.loaded total={} packs={}",
+        offers.offers_total(),
+        discovered.len()
+    );
+    for (kind, count) in offers.kind_counts() {
+        println!("  kind={kind} count={count}");
+    }
+    for (stage, contract, count) in offers.hook_counts_by_stage_contract() {
+        println!("  hooks stage={stage} contract={contract} count={count}");
+    }
+    for (contract, count) in offers.subs_counts_by_contract() {
+        println!("  subs contract={contract} count={count}");
     }
 
     Ok(())

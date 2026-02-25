@@ -114,8 +114,12 @@ pub fn build_bundle(
                     ));
                 }
                 eprintln!(
-                    "Warning: copying pack directory into demo bundle (not portable): {}",
-                    pack
+                    "{}",
+                    crate::operator_i18n::trf(
+                        "demo.build.warn_copying_pack_directory",
+                        "Warning: copying pack directory into demo bundle (not portable): {}",
+                        &[&pack]
+                    )
                 );
                 copy_dir(pack_path, bundle_root.join(&pack))?;
             }

@@ -86,7 +86,6 @@ services:
         &config_path,
         &demo_config,
         None,
-        None,
         &BTreeSet::new(),
         greentic_operator::providers::ProviderSetupOptions {
             providers: None,

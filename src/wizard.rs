@@ -849,18 +849,75 @@ fn validate_bundle_exists(bundle: &Path) -> anyhow::Result<()> {
 }
 
 pub fn print_plan_summary(plan: &WizardPlan) {
-    println!("wizard plan: mode={} dry_run={}", plan.mode, plan.dry_run);
-    println!("bundle: {}", plan.bundle.display());
+    println!(
+        "{} mode={} dry_run={}",
+        crate::operator_i18n::tr("cli.wizard.plan_header", "wizard plan:"),
+        plan.mode,
+        plan.dry_run
+    );
+    println!(
+        "{} {}",
+        crate::operator_i18n::tr("cli.wizard.bundle", "bundle:"),
+        plan.bundle.display()
+    );
     let noop_count = plan
         .steps
         .iter()
         .filter(|step| step.kind == WizardStepKind::NoOp)
         .count();
     if noop_count > 0 {
-        println!("no-op steps: {}", noop_count);
+        println!(
+            "{} {}",
+            crate::operator_i18n::tr("cli.wizard.noop_steps", "no-op steps:"),
+            noop_count
+        );
     }
     for (index, step) in plan.steps.iter().enumerate() {
-        println!("{}. {:?}: {}", index + 1, step.kind, step.description);
+        println!(
+            "{}. {}",
+            index + 1,
+            localized_step_description(&step.description)
+        );
+    }
+}
+
+fn localized_step_description(description: &str) -> String {
+    match description {
+        "Resolve selected pack refs via distributor client" => crate::operator_i18n::tr(
+            "cli.wizard.step.resolve_packs",
+            "Resolve selected pack refs via distributor client",
+        ),
+        "Create demo bundle scaffold using existing conventions" => crate::operator_i18n::tr(
+            "cli.wizard.step.create_bundle",
+            "Create demo bundle scaffold using existing conventions",
+        ),
+        "Copy fetched packs into bundle/packs" => crate::operator_i18n::tr(
+            "cli.wizard.step.copy_packs",
+            "Copy fetched packs into bundle/packs",
+        ),
+        "Apply pack-declared setup outputs through internal setup hooks" => {
+            crate::operator_i18n::tr(
+                "cli.wizard.step.apply_pack_setup",
+                "Apply pack-declared setup outputs through internal setup hooks",
+            )
+        }
+        "Write tenant/team allow rules to gmap" => crate::operator_i18n::tr(
+            "cli.wizard.step.write_gmap",
+            "Write tenant/team allow rules to gmap",
+        ),
+        "Run resolver pipeline (same as demo allow)" => crate::operator_i18n::tr(
+            "cli.wizard.step.run_resolver_create",
+            "Run resolver pipeline (same as demo allow)",
+        ),
+        "Copy state/resolved manifests into resolved/ for demo start" => crate::operator_i18n::tr(
+            "cli.wizard.step.copy_resolved",
+            "Copy state/resolved manifests into resolved/ for demo start",
+        ),
+        "Validate bundle is loadable by internal demo pipeline" => crate::operator_i18n::tr(
+            "cli.wizard.step.validate_bundle",
+            "Validate bundle is loadable by internal demo pipeline",
+        ),
+        _ => description.to_string(),
     }
 }
 

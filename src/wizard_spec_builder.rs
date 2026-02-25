@@ -89,16 +89,17 @@ fn create_validation_form(provider_ids: &[String]) -> Value {
                 "required": false,
                 "list": {
                     "fields": [
-                        { "id": "pack_ref", "type": "string", "title": "Pack ref", "required": true },
-                        { "id": "tenant_id", "type": "string", "title": "Tenant id", "required": false },
-                        { "id": "team_id", "type": "string", "title": "Team id", "required": false },
+                        { "id": "pack_ref", "type": "string", "title": "Pack reference (e.g. /path/to/app.gtpack, file://..., oci://ghcr.io/..., repo://..., store://...)", "required": true },
                         {
-                            "id": "make_default_scope",
+                            "id": "access_scope",
                             "type": "enum",
-                            "title": "Default scope",
+                            "title": "Who can access this application?",
                             "required": false,
-                            "choices": ["none", "global", "tenant", "team"]
-                        }
+                            "choices": ["all_tenants", "tenant_all_teams", "specific_team"]
+                        },
+                        { "id": "tenant_id", "type": "string", "title": "What is the tenant id who can access this application?", "required": false },
+                        { "id": "team_id", "type": "string", "title": "What is the team id who can access this application?", "required": false },
+                        { "id": "make_default_pack", "type": "string", "title": "Is this pack the default pack when no pack is specified [y, N]?", "required": false }
                     ]
                 }
             },
@@ -113,70 +114,15 @@ fn create_validation_form(provider_ids: &[String]) -> Value {
                 }
             },
             {
-                "id": "targets",
-                "type": "list",
-                "title": "Tenants and teams",
-                "title_i18n": { "key": "wizard.create.targets" },
-                "required": true,
-                "list": {
-                    "fields": [
-                        { "id": "tenant_id", "type": "string", "title": "Tenant id", "required": true },
-                        { "id": "team_id", "type": "string", "title": "Team id", "required": false }
-                    ]
-                }
-            },
-            {
-                "id": "access_mode",
-                "type": "enum",
-                "title": "Access mode",
-                "title_i18n": { "key": "wizard.create.access_mode" },
-                "required": true,
-                "choices": ["all_selected_get_all_packs", "per_pack_matrix"]
-            },
-            {
-                "id": "access_change",
-                "type": "list",
-                "title": "Per-pack access matrix",
-                "required": false,
-                "list": {
-                    "fields": [
-                        { "id": "pack_id", "type": "string", "title": "Pack id", "required": true },
-                        {
-                            "id": "operation",
-                            "type": "enum",
-                            "title": "Operation",
-                            "required": true,
-                            "choices": ["allow_add", "allow_remove"]
-                        },
-                        { "id": "tenant_id", "type": "string", "title": "Tenant id", "required": true },
-                        { "id": "team_id", "type": "string", "title": "Team id", "required": false }
-                    ]
-                }
-            },
-            {
                 "id": "execution_mode",
                 "type": "enum",
                 "title": "Execution mode",
                 "title_i18n": { "key": "wizard.create.execution_mode" },
                 "required": true,
-                "choices": ["dry_run", "execute"]
+                "choices": ["dry run", "execute"]
             }
         ],
-        "validations": [
-            {
-                "id": "team_requires_tenant",
-                "message": "team_id requires tenant_id",
-                "fields": ["tenant_id", "team_id"],
-                "condition": {
-                    "op": "and",
-                    "expressions": [
-                        { "op": "is_set", "path": "team_id" },
-                        { "op": "not", "expression": { "op": "is_set", "path": "tenant_id" } }
-                    ]
-                },
-                "code": "team_requires_tenant"
-            }
-        ]
+        "validations": []
     })
 }
 
@@ -238,7 +184,7 @@ fn update_validation_form(provider_ids: &[String]) -> Value {
                 "required": false,
                 "list": {
                     "fields": [
-                        { "id": "pack_ref", "type": "string", "title": "Pack ref", "required": true }
+                        { "id": "pack_ref", "type": "string", "title": "Pack reference (e.g. /path/to/app.gtpack, file://..., oci://ghcr.io/..., repo://..., store://...)", "required": true }
                     ]
                 }
             },
@@ -330,7 +276,7 @@ fn update_validation_form(provider_ids: &[String]) -> Value {
                 "title": "Execution mode",
                 "title_i18n": { "key": "wizard.update.execution_mode" },
                 "required": true,
-                "choices": ["dry_run", "execute"]
+                "choices": ["dry run", "execute"]
             }
         ],
         "validations": []
@@ -419,7 +365,7 @@ fn remove_validation_form() -> Value {
                 "title": "Execution mode",
                 "title_i18n": { "key": "wizard.remove.execution_mode" },
                 "required": true,
-                "choices": ["dry_run", "execute"]
+                "choices": ["dry run", "execute"]
             }
         ],
         "validations": []

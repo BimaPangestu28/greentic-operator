@@ -9,6 +9,7 @@ use std::path::{Path, PathBuf};
 use crate::demo::runner_host::{DemoRunnerHost, OperatorContext};
 use crate::discovery;
 use crate::domains::Domain;
+use crate::hooks::runner::apply_post_ingress_hooks_http;
 use crate::messaging_universal::dto::{HttpInV1, HttpOutV1};
 use crate::secrets_gate::SecretsManagerHandle;
 
@@ -75,8 +76,9 @@ pub fn run_ingress(
         Some(value) => value,
         None => serde_json::json!({}),
     };
-    let response = serde_json::from_value::<HttpOutV1>(output)
+    let mut response = serde_json::from_value::<HttpOutV1>(output)
         .with_context(|| "failed to deserialize HttpOutV1 response")?;
+    apply_post_ingress_hooks_http(bundle, &runner_host, request, &mut response, ctx)?;
     let mut envelopes = Vec::new();
     for event in response.events.iter() {
         let envelope: ChannelMessageEnvelope =

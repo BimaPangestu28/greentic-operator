@@ -3,12 +3,8 @@ use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 
-use crate::dev_mode::DevSettings;
-
 #[derive(Clone, Debug, Deserialize, Default)]
 pub struct OperatorConfig {
-    #[serde(default)]
-    pub dev: Option<DevSettings>,
     #[serde(default)]
     pub services: Option<OperatorServicesConfig>,
     #[serde(default)]

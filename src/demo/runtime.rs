@@ -16,7 +16,6 @@ use crate::supervisor;
 
 use crate::cloudflared::{self, CloudflaredConfig};
 use crate::config::{DemoConfig, DemoSubscriptionsMode};
-use crate::dev_mode::DevSettingsResolved;
 
 use crate::subscriptions_universal::{
     build_runner, ensure_desired_subscriptions, scheduler::Scheduler, service::SubscriptionService,
@@ -181,7 +180,10 @@ fn print_service_summary(summaries: &[ServiceSummary]) {
     if summaries.is_empty() {
         return;
     }
-    println!("\nStarted services:");
+    println!(
+        "\n{}",
+        crate::operator_i18n::tr("demo.runtime.started_services", "Started services:")
+    );
     for summary in summaries {
         println!("{}", summary.describe());
     }
@@ -335,11 +337,25 @@ fn spawn_if_needed(
     if let Some(pid) = read_pid(&pid_path)?
         && supervisor::is_running(pid)
     {
-        println!("{}: already running (pid={pid})", spec.id.as_str());
+        println!(
+            "{}",
+            crate::operator_i18n::trf(
+                "demo.runtime.service_already_running",
+                "{}: already running (pid={})",
+                &[spec.id.as_str(), &pid.to_string()]
+            )
+        );
         return Ok(None);
     }
     let handle = supervisor::spawn_service(paths, spec.clone(), log_path_override.clone())?;
-    println!("{}: started (pid={})", spec.id.as_str(), handle.pid);
+    println!(
+        "{}",
+        crate::operator_i18n::trf(
+            "demo.runtime.service_started",
+            "{}: started (pid={})",
+            &[spec.id.as_str(), &handle.pid.to_string()]
+        )
+    );
     if spec.id.as_str() == "nats" {
         operator_log::info(
             module_path!(),
@@ -455,7 +471,14 @@ pub fn demo_up(
         );
         service_summaries.push(summary);
         public_base_url = Some(url.clone());
-        println!("Public URL (service=cloudflared): {}", url);
+        println!(
+            "{}",
+            crate::operator_i18n::trf(
+                "demo.runtime.public_url_cloudflared",
+                "Public URL (service=cloudflared): {}",
+                &[&url]
+            )
+        );
     }
 
     let mut resolved_nats_url = nats_url.map(|value| value.to_string());
@@ -497,7 +520,14 @@ pub fn demo_up(
                         mark_nats_started(&paths)?;
                     }
                     Err(err) => {
-                        eprintln!("Warning: failed to start NATS: {err}");
+                        eprintln!(
+                            "{}",
+                            crate::operator_i18n::trf(
+                                "demo.runtime.warn_failed_start_nats",
+                                "Warning: failed to start NATS: {}",
+                                &[&err.to_string()]
+                            )
+                        );
                         operator_log::error(
                             module_path!(),
                             format!("failed to start nats (log={}): {err}", nats_log.display()),
@@ -506,7 +536,14 @@ pub fn demo_up(
                 }
             }
             Err(err) => {
-                eprintln!("Warning: failed to prepare NATS log: {err}");
+                eprintln!(
+                    "{}",
+                    crate::operator_i18n::trf(
+                        "demo.runtime.warn_failed_prepare_nats_log",
+                        "Warning: failed to prepare NATS log: {}",
+                        &[&err.to_string()]
+                    )
+                );
                 operator_log::error(module_path!(), format!("failed to open nats.log: {err}"));
             }
         }
@@ -542,10 +579,22 @@ pub fn demo_up(
         messaging_summary.add_detail("embedded messaging stack".to_string());
         service_summaries.push(messaging_summary);
     } else {
-        println!("messaging: running embedded runner (no gsm gateway/egress)");
+        println!(
+            "{}",
+            crate::operator_i18n::tr(
+                "demo.runtime.messaging_embedded",
+                "messaging: running embedded runner (no gsm gateway/egress)"
+            )
+        );
     }
 
-    println!("events: handled in-process (HTTP ingress + timer scheduler)");
+    println!(
+        "{}",
+        crate::operator_i18n::tr(
+            "demo.runtime.events_in_process",
+            "events: handled in-process (HTTP ingress + timer scheduler)"
+        )
+    );
     print_service_summary(&service_summaries);
 
     if !run_gsm_services {
@@ -571,7 +620,6 @@ pub fn demo_up(
 pub fn demo_up_services(
     config_path: &Path,
     config: &DemoConfig,
-    dev_settings: Option<DevSettingsResolved>,
     cloudflared: Option<CloudflaredConfig>,
     restart: &BTreeSet<String>,
     provider_options: crate::providers::ProviderSetupOptions,
@@ -657,8 +705,12 @@ pub fn demo_up_services(
             );
         }
         println!(
-            "Public URL (service=cloudflared domains={domain_list}): {}",
-            handle.url
+            "{}",
+            crate::operator_i18n::trf(
+                "demo.runtime.public_url_cloudflared_domains",
+                "Public URL (service=cloudflared domains={}): {}",
+                &[&domain_list, &handle.url]
+            )
         );
         service_tracker.record_with_log("cloudflared", "cloudflared", Some(&handle.log_path))?;
         Some(handle.url)
@@ -674,7 +726,6 @@ pub fn demo_up_services(
         if config.services.nats.spawn.enabled {
             let spec = build_service_spec(
                 config_dir,
-                dev_settings.as_ref(),
                 "nats",
                 &config.services.nats.spawn.binary,
                 &config.services.nats.spawn.args,
@@ -704,7 +755,6 @@ pub fn demo_up_services(
     }
     let gateway_spec = build_service_spec(
         config_dir,
-        dev_settings.as_ref(),
         "gateway",
         &config.services.gateway.binary,
         &config.services.gateway.args,
@@ -724,7 +774,6 @@ pub fn demo_up_services(
     }
     let egress_spec = build_service_spec(
         config_dir,
-        dev_settings.as_ref(),
         "egress",
         &config.services.egress.binary,
         &config.services.egress.args,
@@ -751,7 +800,6 @@ pub fn demo_up_services(
                 }
                 let spec = build_service_spec(
                     config_dir,
-                    dev_settings.as_ref(),
                     "subscriptions",
                     &config.services.subscriptions.msgraph.binary,
                     &args,
@@ -797,7 +845,6 @@ pub fn demo_up_services(
     crate::providers::run_provider_setup(
         config_dir,
         config,
-        dev_settings,
         endpoints.public_base_url.as_deref(),
         provider_options,
     )?;
@@ -813,11 +860,18 @@ pub fn demo_status_runtime(
     let paths = RuntimePaths::new(state_dir, tenant, team);
     let statuses = supervisor::read_status(&paths)?;
     if statuses.is_empty() {
-        println!("none running");
+        println!(
+            "{}",
+            crate::operator_i18n::tr("demo.runtime.none_running", "none running")
+        );
         return Ok(());
     }
     for status in statuses {
-        let state = if status.running { "running" } else { "stopped" };
+        let state = if status.running {
+            crate::operator_i18n::tr("demo.runtime.status_running", "running")
+        } else {
+            crate::operator_i18n::tr("demo.runtime.status_stopped", "stopped")
+        };
         let pid = status
             .pid
             .map(|value| value.to_string())
@@ -826,12 +880,12 @@ pub fn demo_status_runtime(
             println!(
                 "{}: {} (pid={}, log={})",
                 status.id.as_str(),
-                state,
+                &state,
                 pid,
                 status.log_path.display()
             );
         } else {
-            println!("{}: {} (pid={})", status.id.as_str(), state, pid);
+            println!("{}: {} (pid={})", status.id.as_str(), &state, pid);
         }
     }
     Ok(())
@@ -874,7 +928,13 @@ pub fn demo_down_runtime(
     if all {
         let pids_root = state_dir.join("pids");
         if !pids_root.exists() {
-            println!("No services to stop.");
+            println!(
+                "{}",
+                crate::operator_i18n::tr(
+                    "demo.runtime.no_services_to_stop",
+                    "No services to stop."
+                )
+            );
             return Ok(());
         }
         for entry in std::fs::read_dir(&pids_root)? {
@@ -891,19 +951,39 @@ pub fn demo_down_runtime(
             }
         }
         remove_service_manifest(&paths)?;
-        println!("Stopped all services under {}", pids_root.display());
+        println!(
+            "{}",
+            crate::operator_i18n::trf(
+                "demo.runtime.stopped_all_under",
+                "Stopped all services under {}",
+                &[&pids_root.display().to_string()]
+            )
+        );
         return Ok(());
     }
 
     if let Some(manifest) = read_service_manifest(&paths)? {
         if manifest.services.is_empty() {
-            println!("No services to stop.");
+            println!(
+                "{}",
+                crate::operator_i18n::tr(
+                    "demo.runtime.no_services_to_stop",
+                    "No services to stop."
+                )
+            );
             return Ok(());
         }
         for entry in manifest.services.iter().rev() {
             let id = supervisor::ServiceId::new(entry.id.clone())?;
             if let Err(err) = supervisor::stop_service(&paths, &id, timeout_ms) {
-                eprintln!("Warning: failed to stop {}: {err}", entry.id);
+                eprintln!(
+                    "{}",
+                    crate::operator_i18n::trf(
+                        "demo.runtime.warn_failed_stop_service",
+                        "Warning: failed to stop {}: {}",
+                        &[&entry.id, &err.to_string()]
+                    )
+                );
             }
         }
         remove_service_manifest(&paths)?;
@@ -912,7 +992,10 @@ pub fn demo_down_runtime(
 
     let pids_dir = paths.pids_dir();
     if !pids_dir.exists() {
-        println!("No services to stop.");
+        println!(
+            "{}",
+            crate::operator_i18n::tr("demo.runtime.no_services_to_stop", "No services to stop.")
+        );
         return Ok(());
     }
     for entry in std::fs::read_dir(&pids_dir)? {
@@ -1019,7 +1102,14 @@ fn stop_started_nats(paths: &RuntimePaths, state_dir: &Path) -> anyhow::Result<(
             let _ = std::fs::remove_file(&marker);
         }
         Err(err) => {
-            eprintln!("Warning: failed to stop nats: {err}");
+            eprintln!(
+                "{}",
+                crate::operator_i18n::trf(
+                    "demo.runtime.warn_failed_stop_nats",
+                    "Warning: failed to stop nats: {}",
+                    &[&err.to_string()]
+                )
+            );
         }
     }
     Ok(())
@@ -1031,7 +1121,6 @@ fn nats_started_marker(paths: &RuntimePaths) -> PathBuf {
 
 fn build_service_spec(
     config_dir: &Path,
-    dev_settings: Option<&DevSettingsResolved>,
     service_id: &str,
     binary: &str,
     args: &[String],
@@ -1051,7 +1140,6 @@ fn build_service_spec(
         binary,
         &crate::bin_resolver::ResolveCtx {
             config_dir: config_dir.to_path_buf(),
-            dev: dev_settings.cloned(),
             explicit_path: explicit,
         },
     )?;

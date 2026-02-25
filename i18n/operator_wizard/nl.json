@@ -1,0 +1,16 @@
+{
+  "wizard.create.bundle_path": "Pad voor bundeluitvoer",
+  "wizard.create.bundle_name": "Bundelnaam",
+  "wizard.create.locale": "Taal",
+  "wizard.create.pack_refs": "Pack-referenties",
+  "wizard.create.providers": "Providers",
+  "wizard.create.targets": "Tenants en teams",
+  "wizard.create.access_mode": "Toegangsmodus",
+  "wizard.create.execution_mode": "Uitvoeringsmodus",
+  "wizard.update.bundle_path": "Bundelpad",
+  "wizard.update.ops": "Updatebewerkingen",
+  "wizard.update.execution_mode": "Uitvoeringsmodus",
+  "wizard.remove.bundle_path": "Bundelpad",
+  "wizard.remove.targets": "Te verwijderen doelen",
+  "wizard.remove.execution_mode": "Uitvoeringsmodus"
+}

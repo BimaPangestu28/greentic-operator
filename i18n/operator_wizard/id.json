@@ -1,0 +1,16 @@
+{
+  "wizard.create.bundle_path": "Paket çıktı yolu",
+  "wizard.create.bundle_name": "Paket adı",
+  "wizard.create.locale": "Yerel ayar",
+  "wizard.create.pack_refs": "Paket referansları",
+  "wizard.create.providers": "Sağlayıcılar",
+  "wizard.create.targets": "Kiracılar ve ekipler",
+  "wizard.create.access_mode": "Erişim modu",
+  "wizard.create.execution_mode": "Yürütme modu",
+  "wizard.update.bundle_path": "Paket yolu",
+  "wizard.update.ops": "Güncelleme işlemleri",
+  "wizard.update.execution_mode": "Yürütme modu",
+  "wizard.remove.bundle_path": "Paket yolu",
+  "wizard.remove.targets": "Kaldırma hedefleri",
+  "wizard.remove.execution_mode": "Yürütme modu"
+}

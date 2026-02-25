@@ -1,0 +1,16 @@
+{
+  "wizard.create.bundle_path": "Путь вывода бандла",
+  "wizard.create.bundle_name": "Имя бандла",
+  "wizard.create.locale": "Язык",
+  "wizard.create.pack_refs": "Ссылки на паки",
+  "wizard.create.providers": "Провайдеры",
+  "wizard.create.targets": "Тенанты и команды",
+  "wizard.create.access_mode": "Режим доступа",
+  "wizard.create.execution_mode": "Режим выполнения",
+  "wizard.update.bundle_path": "Путь к бандлу",
+  "wizard.update.ops": "Операции обновления",
+  "wizard.update.execution_mode": "Режим выполнения",
+  "wizard.remove.bundle_path": "Путь к бандлу",
+  "wizard.remove.targets": "Цели для удаления",
+  "wizard.remove.execution_mode": "Режим выполнения"
+}

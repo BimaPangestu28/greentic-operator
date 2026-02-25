@@ -11,6 +11,8 @@ pushd "$ROOT_DIR" >/dev/null
 
 echo "[local_check] cargo fmt --check"
 cargo fmt --check
+echo "[local_check] i18n quality check"
+python3 "$ROOT_DIR/ci/check_i18n_quality.py"
 echo "[local_check] cargo clippy"
 cargo clippy --locked -- -D warnings
 echo "[local_check] cargo test --locked"
