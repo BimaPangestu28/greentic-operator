@@ -92,7 +92,7 @@ mod tests {
         let map = load("nl").expect("load nl");
         assert_eq!(
             map.get("wizard.create.bundle_name").map(String::as_str),
-            Some("Bundle-Name")
+            Some("Bundelnaam")
         );
     }
 
