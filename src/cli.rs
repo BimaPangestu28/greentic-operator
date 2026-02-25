@@ -4538,7 +4538,7 @@ impl DemoSendArgs {
         )
         .with_context(|| "render_plan failed")?;
         let render_plan_out: RenderPlanOutV1 =
-            serde_json::from_value(plan_value).context("render_plan output invalid")?;
+            serde_json::from_value(plan_value.clone()).context("render_plan output invalid")?;
         debug_print_render_plan_output(&render_plan_out);
         if !render_plan_out.ok {
             let err = render_plan_out
@@ -4546,7 +4546,7 @@ impl DemoSendArgs {
                 .unwrap_or_else(|| "render_plan returned error".to_string());
             return Err(anyhow::anyhow!(err));
         }
-        let encode_input = egress::build_encode_input(message.clone(), render_plan_input_value);
+        let encode_input = egress::build_encode_input(message.clone(), plan_value.clone());
         debug_print_encode_input(&encode_input);
         let payload_value = run_provider_component_op_json(
             &runner_host,
