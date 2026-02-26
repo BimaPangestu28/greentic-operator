@@ -24,6 +24,9 @@ fn write_test_pack(path: &Path, pack_id: &str) -> anyhow::Result<()> {
 fn wizard_command(args: &[String], stdin_payload: Option<&str>) -> Output {
     let mut command = Command::new(env!("CARGO_BIN_EXE_greentic-operator"));
     command.args(args);
+    command.env("LC_ALL", "en_US.UTF-8");
+    command.env("LANG", "en_US.UTF-8");
+    command.env("LANGUAGE", "en");
     command.stdout(Stdio::piped()).stderr(Stdio::piped());
     if stdin_payload.is_some() {
         command.stdin(Stdio::piped());

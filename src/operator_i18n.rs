@@ -3,21 +3,37 @@ use include_dir::{Dir, include_dir};
 use once_cell::sync::Lazy;
 use std::collections::BTreeMap;
 use std::sync::RwLock;
+use unic_langid::LanguageIdentifier;
 
 pub type Map = BTreeMap<String, String>;
 
 static OPERATOR_CLI_I18N: Dir<'_> = include_dir!("$CARGO_MANIFEST_DIR/i18n/operator_cli");
-static CURRENT_LOCALE: Lazy<RwLock<String>> = Lazy::new(|| RwLock::new("en".to_string()));
+static CURRENT_LOCALE: Lazy<RwLock<String>> = Lazy::new(|| RwLock::new(select_locale(None)));
 
 pub fn select_locale(cli_locale: Option<&str>) -> String {
-    let env_locale = ["LC_ALL", "LC_MESSAGES", "LANG"]
-        .into_iter()
-        .find_map(|key| std::env::var(key).ok())
-        .filter(|value| {
-            let trimmed = value.trim();
-            !trimmed.is_empty() && trimmed != "C" && trimmed != "POSIX"
-        });
-    greentic_i18n::select_locale_with_sources(cli_locale, None, env_locale.as_deref(), None)
+    let supported = supported_locales();
+
+    if let Some(cli) = cli_locale
+        && let Some(found) = resolve_supported(cli, &supported)
+    {
+        return found;
+    }
+
+    for env_key in ["LC_ALL", "LC_MESSAGES", "LANG"] {
+        if let Ok(raw) = std::env::var(env_key)
+            && let Some(found) = resolve_supported(&raw, &supported)
+        {
+            return found;
+        }
+    }
+
+    if let Some(raw) = sys_locale::get_locale()
+        && let Some(found) = resolve_supported(&raw, &supported)
+    {
+        return found;
+    }
+
+    "en".to_string()
 }
 
 pub fn set_locale(locale: impl Into<String>) {
@@ -31,7 +47,7 @@ pub fn current_locale() -> String {
     CURRENT_LOCALE
         .read()
         .map(|value| value.clone())
-        .unwrap_or_else(|_| "en".to_string())
+        .unwrap_or_else(|_| select_locale(None))
 }
 
 pub fn tr(key: &str, fallback: &str) -> String {
@@ -86,6 +102,64 @@ fn locale_candidates(locale: &str) -> Vec<String> {
     out
 }
 
+fn normalize_locale_tag(raw: &str) -> Option<String> {
+    let mut cleaned = raw.trim();
+    if cleaned.is_empty() {
+        return None;
+    }
+    if cleaned.eq_ignore_ascii_case("c") || cleaned.eq_ignore_ascii_case("posix") {
+        return None;
+    }
+    if let Some((head, _)) = cleaned.split_once('.') {
+        cleaned = head;
+    }
+    if let Some((head, _)) = cleaned.split_once('@') {
+        cleaned = head;
+    }
+    if cleaned.eq_ignore_ascii_case("c") || cleaned.eq_ignore_ascii_case("posix") {
+        return None;
+    }
+    let normalized = cleaned.replace('_', "-");
+    normalized
+        .parse::<LanguageIdentifier>()
+        .ok()
+        .map(|value| value.to_string())
+}
+
+fn base_language(tag: &str) -> Option<String> {
+    tag.split('-')
+        .next()
+        .map(|value| value.to_ascii_lowercase())
+}
+
+fn resolve_supported(candidate: &str, supported: &[String]) -> Option<String> {
+    let normalized = normalize_locale_tag(candidate)?;
+    if supported.iter().any(|value| value == &normalized) {
+        return Some(normalized);
+    }
+    let base = base_language(&normalized)?;
+    if supported.iter().any(|value| value == &base) {
+        return Some(base);
+    }
+    None
+}
+
+fn supported_locales() -> Vec<String> {
+    let mut out = OPERATOR_CLI_I18N
+        .files()
+        .filter_map(|file| {
+            file.path()
+                .file_name()
+                .and_then(|name| name.to_str())
+                .and_then(|name| name.strip_suffix(".json"))
+                .map(|name| name.to_string())
+        })
+        .collect::<Vec<_>>();
+    out.sort();
+    out.dedup();
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -97,5 +171,22 @@ mod tests {
             map.get("cli.common.answer_yes_no").map(String::as_str),
             Some("bitte mit y oder n antworten")
         );
+    }
+
+    #[test]
+    fn normalize_locale_tag_handles_common_system_forms() {
+        assert_eq!(
+            normalize_locale_tag("en_US.UTF-8").as_deref(),
+            Some("en-US")
+        );
+        assert_eq!(normalize_locale_tag("de_DE@euro").as_deref(), Some("de-DE"));
+        assert_eq!(normalize_locale_tag("es").as_deref(), Some("es"));
+    }
+
+    #[test]
+    fn normalize_locale_tag_rejects_c_posix() {
+        assert_eq!(normalize_locale_tag("C"), None);
+        assert_eq!(normalize_locale_tag("POSIX"), None);
+        assert_eq!(normalize_locale_tag("C.UTF-8"), None);
     }
 }

@@ -18,7 +18,7 @@ fn missing_subcommand_error_is_localized_with_cli_locale() {
     );
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.contains("erfordert einen Unterbefehl"),
+        stderr.contains("erfordert ein Unterkommando"),
         "expected german localized subcommand error, got: {stderr}"
     );
     assert!(
@@ -32,6 +32,9 @@ fn missing_subcommand_error_falls_back_to_english_for_unknown_locale() {
     let output = Command::new(operator_bin())
         .arg("--locale")
         .arg("zz-ZZ")
+        .env("LC_ALL", "en_US.UTF-8")
+        .env("LANG", "en_US.UTF-8")
+        .env("LANGUAGE", "en")
         .output()
         .expect("run greentic-operator");
 
