@@ -78,8 +78,8 @@ pub fn load_app_pack_info(pack_path: &Path) -> Result<AppPackInfo> {
     let mut buf = Vec::new();
     manifest.read_to_end(&mut buf)?;
     let value: CborValue = serde_cbor::from_slice(&buf)?;
-    let pack_id = extract_text_key(&value, "pack_id")
-        .ok_or_else(|| anyhow::anyhow!("manifest missing pack_id in {pack_path:?}"))?;
+    let pack_id = extract_text_or_symbol(&value, "pack_id", "pack_ids")
+        .ok_or_else(|| anyhow::anyhow!("pack manifest missing pack id in {pack_path:?}"))?;
     let flows = extract_flows(&value);
     Ok(AppPackInfo { pack_id, flows })
 }
@@ -133,17 +133,35 @@ pub fn run_app_flow(
     let output = runner_exec::run_provider_pack_flow(request)?;
     let value = collect_transcript_outputs(&output.run_dir)?
         .ok_or_else(|| anyhow::anyhow!("app flow produced no outputs"))?;
-    parse_envelopes(&value)
+    parse_envelopes(&value, envelope)
 }
 
-fn extract_text_key(value: &CborValue, key: &str) -> Option<String> {
-    if let CborValue::Map(map) = value {
-        let key = CborValue::Text(key.to_string());
-        if let Some(CborValue::Text(text)) = map.get(&key) {
-            return Some(text.clone());
+/// Extract a text field that may be stored as a symbol index (integer)
+/// referencing the symbols table in the manifest.
+fn extract_text_or_symbol(value: &CborValue, key: &str, symbol_table: &str) -> Option<String> {
+    let map = match value {
+        CborValue::Map(map) => map,
+        _ => return None,
+    };
+    let cbor_key = CborValue::Text(key.to_string());
+    match map.get(&cbor_key)? {
+        CborValue::Text(text) => Some(text.clone()),
+        CborValue::Integer(idx) => {
+            let idx = *idx as usize;
+            let symbols_key = CborValue::Text("symbols".to_string());
+            let table_key = CborValue::Text(symbol_table.to_string());
+            let symbols = map.get(&symbols_key)?;
+            if let CborValue::Map(sym_map) = symbols {
+                if let Some(CborValue::Array(entries)) = sym_map.get(&table_key) {
+                    if let Some(CborValue::Text(resolved)) = entries.get(idx) {
+                        return Some(resolved.clone());
+                    }
+                }
+            }
+            None
         }
+        _ => None,
     }
-    None
 }
 
 fn extract_flows(value: &CborValue) -> Vec<AppFlowInfo> {
@@ -207,7 +225,10 @@ fn collect_transcript_outputs(run_dir: &Path) -> Result<Option<JsonValue>> {
     Ok(last)
 }
 
-fn parse_envelopes(value: &JsonValue) -> Result<Vec<ChannelMessageEnvelope>> {
+fn parse_envelopes(
+    value: &JsonValue,
+    ingress_envelope: &ChannelMessageEnvelope,
+) -> Result<Vec<ChannelMessageEnvelope>> {
     if let Some(v) = value.as_array() {
         return parse_envelope_array(v);
     }
@@ -218,6 +239,19 @@ fn parse_envelopes(value: &JsonValue) -> Result<Vec<ChannelMessageEnvelope>> {
         let envelope: ChannelMessageEnvelope = serde_json::from_value(envelope.clone())
             .context("app flow message payload is not a ChannelMessageEnvelope")?;
         return Ok(vec![envelope]);
+    }
+    // Fallback: wrap simple text output in a reply envelope based on the ingress message.
+    // Check payload.text (runner transcript format) then text then raw string.
+    if let Some(text) = value
+        .get("payload")
+        .and_then(|p| p.get("text"))
+        .and_then(JsonValue::as_str)
+        .or_else(|| value.get("text").and_then(JsonValue::as_str))
+        .or_else(|| value.as_str())
+    {
+        let mut reply = ingress_envelope.clone();
+        reply.text = Some(text.to_string());
+        return Ok(vec![reply]);
     }
     Err(anyhow::anyhow!(
         "app flow output did not produce envelope(s)"
@@ -283,6 +317,40 @@ mod tests {
         };
         let flow = select_app_flow(&info).unwrap();
         assert_eq!(flow.id, "default");
+    }
+
+    fn test_envelope() -> ChannelMessageEnvelope {
+        serde_json::from_value(json!({
+            "id": "test-1",
+            "tenant": {"env": "dev", "tenant": "t", "tenant_id": "t", "attempt": 0},
+            "channel": "telegram",
+            "session_id": "s1",
+            "text": "hello"
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn parse_envelopes_payload_text_fallback() {
+        let ingress = test_envelope();
+        // Runner transcript format: {"payload": {"text": "..."}, "control": {...}}
+        let output = json!({
+            "control": {"routing": "out"},
+            "payload": {"text": "Echo: received your message"},
+            "state_updates": {}
+        });
+        let result = parse_envelopes(&output, &ingress).unwrap();
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].text.as_deref(), Some("Echo: received your message"));
+    }
+
+    #[test]
+    fn parse_envelopes_direct_text_fallback() {
+        let ingress = test_envelope();
+        let output = json!({"text": "simple reply"});
+        let result = parse_envelopes(&output, &ingress).unwrap();
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].text.as_deref(), Some("simple reply"));
     }
 
     #[test]
