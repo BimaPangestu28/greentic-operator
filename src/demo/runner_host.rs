@@ -18,7 +18,7 @@ use greentic_runner_host::{
         WebhookPolicy,
     },
     pack::{ComponentResolution, PackRuntime},
-    storage::{DynSessionStore, new_state_store},
+    storage::{DynSessionStore, DynStateStore, new_state_store},
     trace::TraceConfig,
     validate::ValidationConfig,
 };
@@ -28,6 +28,30 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value as JsonValue, json};
 use tokio::runtime::Runtime as TokioRuntime;
 use zip::ZipArchive;
+
+/// Create a Tokio runtime for blocking async operations.
+/// When called from within an existing runtime (e.g., HTTP ingress handler),
+/// spawns a dedicated thread to avoid "Cannot start a runtime from within a
+/// runtime" panics.
+fn make_runtime_or_thread_scope<F, T>(f: F) -> T
+where
+    F: FnOnce(&TokioRuntime) -> T + Send,
+    T: Send,
+{
+    if tokio::runtime::Handle::try_current().is_ok() {
+        std::thread::scope(|s| {
+            s.spawn(|| {
+                let rt = TokioRuntime::new().expect("failed to create tokio runtime");
+                f(&rt)
+            })
+            .join()
+            .expect("provider invocation thread panicked")
+        })
+    } else {
+        let rt = TokioRuntime::new().expect("failed to create tokio runtime");
+        f(&rt)
+    }
+}
 
 use crate::runner_exec;
 use crate::runner_integration;
@@ -154,6 +178,7 @@ pub struct DemoRunnerHost {
     capability_registry: CapabilityRegistry,
     secrets_handle: SecretsManagerHandle,
     card_renderer: CardRenderer,
+    state_store: DynStateStore,
     debug_enabled: bool,
 }
 
@@ -230,6 +255,7 @@ impl DemoRunnerHost {
             capability_registry,
             secrets_handle,
             card_renderer: CardRenderer::new(),
+            state_store: new_state_store(),
             debug_enabled,
         })
     }
@@ -731,10 +757,8 @@ impl DemoRunnerHost {
         payload_bytes: &[u8],
         ctx: &OperatorContext,
     ) -> anyhow::Result<FlowOutcome> {
-        let runtime = TokioRuntime::new()
-            .context("failed to create tokio runtime for provider invocation")?;
         let payload = payload_bytes.to_vec();
-        let result = runtime.block_on(async {
+        let result = make_runtime_or_thread_scope(|runtime| runtime.block_on(async {
             let host_config = Arc::new(build_demo_host_config(&ctx.tenant));
             let dev_store_display = self
                 .secrets_handle
@@ -762,7 +786,7 @@ impl DemoRunnerHost {
                 None,
                 Some(&pack.path),
                 None::<DynSessionStore>,
-                Some(new_state_store()),
+                Some(self.state_store.clone()),
                 Arc::new(RunnerWasiPolicy::default()),
                 self.secrets_handle.runtime_manager(Some(&pack.pack_id)),
                 None,
@@ -810,7 +834,7 @@ impl DemoRunnerHost {
             pack_runtime
                 .invoke_provider(&binding, exec_ctx, op_id, payload)
                 .await
-        });
+        }));
 
         match result {
             Ok(value) => Ok(FlowOutcome {

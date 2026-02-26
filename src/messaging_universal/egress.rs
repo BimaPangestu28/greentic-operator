@@ -36,11 +36,13 @@ pub fn build_encode_input(message: serde_json::Value, plan: serde_json::Value) -
 
 pub fn build_send_payload(
     payload: ProviderPayloadV1,
+    provider_type: impl Into<String>,
     tenant: impl Into<String>,
     team: Option<String>,
 ) -> SendPayloadInV1 {
     SendPayloadInV1 {
         v: 1,
+        provider_type: provider_type.into(),
         payload,
         tenant: crate::messaging_universal::dto::TenantHint {
             tenant: tenant.into(),
@@ -163,6 +165,7 @@ pub fn run_end_to_end(
                             body_b64: STANDARD
                                 .encode(serde_json::to_vec(&payload_from_message(&message_value))?),
                             metadata_json: Some(serde_json::to_string(&message_value)?),
+                            metadata: None,
                         }
                     }
                 };
@@ -180,6 +183,7 @@ pub fn run_end_to_end(
 
             let send_input = SendPayloadInV1 {
                 v: 1,
+                provider_type: provider.to_string(),
                 payload,
                 tenant: tenant_hint(ctx),
                 reply_scope: None,
@@ -282,7 +286,10 @@ pub fn encode_payload(
     )?;
     let validated = ensure_success(&outcome, provider, "encode")?;
     let value = validated.output.clone().unwrap_or_else(|| json!({}));
-    serde_json::from_value(value).context("failed to parse ProviderPayloadV1 from encode output")
+    // Providers wrap the payload in {"ok": true, "payload": {...}} — unwrap if present.
+    let payload_value = value.get("payload").cloned().unwrap_or(value);
+    serde_json::from_value(payload_value)
+        .context("failed to parse ProviderPayloadV1 from encode output")
 }
 
 fn invoke_flow(

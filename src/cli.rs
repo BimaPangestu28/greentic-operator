@@ -4263,16 +4263,11 @@ impl DemoSendArgs {
             .ok_or_else(|| anyhow::anyhow!("encode output missing payload"))?;
         let send_input = egress::build_send_payload(
             payload,
+            provider_type.clone(),
             self.tenant.clone(),
             team.map(|value| value.to_string()),
         );
-        let mut send_value = serde_json::to_value(&send_input)?;
-        if let Some(map) = send_value.as_object_mut() {
-            map.insert(
-                "provider_type".to_string(),
-                JsonValue::String(provider_type.clone()),
-            );
-        }
+        let send_value = serde_json::to_value(&send_input)?;
         let send_outcome = run_provider_component_op(
             &runner_host,
             &pack,

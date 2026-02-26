@@ -1729,6 +1729,10 @@ dependencies = [
 [[package]]
 name = "greentic-i18n"
 version = "0.4.56"
+
+[[package]]
+name = "greentic-i18n"
+version = "0.4.56"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "44951881c763069e14624cf8cf1dddff706ad4d8132570dc299af0b855cf4458"
 
@@ -1802,7 +1806,7 @@ dependencies = [
  "clap",
  "directories-next",
  "greentic-distributor-client",
- "greentic-i18n",
+ "greentic-i18n 0.4.56 (registry+https://github.com/rust-lang/crates.io-index)",
  "greentic-interfaces",
  "greentic-interfaces-guest",
  "greentic-interfaces-host",
@@ -1821,6 +1825,7 @@ dependencies = [
  "libc",
  "oci-distribution",
  "once_cell",
+ "qa-spec",
  "rand 0.10.0",
  "rpassword",
  "semver",
@@ -1892,7 +1897,7 @@ dependencies = [
  "greentic-pack-lib",
  "greentic-runner-host",
  "parking_lot",
- "runner-core",
+ "runner-core 0.4.59",
  "serde",
  "serde_json",
  "serde_yaml_gtc",
@@ -1905,9 +1910,7 @@ dependencies = [
 
 [[package]]
 name = "greentic-runner-host"
-version = "0.4.59"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5f02f02ac6dd6811b70e617651eb5c127b776fb71730cc2ca8bad852e03cc725"
+version = "0.4.60"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -1924,7 +1927,7 @@ dependencies = [
  "greentic-config-types",
  "greentic-distributor-client",
  "greentic-flow",
- "greentic-i18n",
+ "greentic-i18n 0.4.56",
  "greentic-interfaces",
  "greentic-interfaces-host",
  "greentic-interfaces-wasmtime",
@@ -1945,7 +1948,7 @@ dependencies = [
  "parking_lot",
  "rand 0.10.0",
  "reqwest 0.13.2",
- "runner-core",
+ "runner-core 0.4.60",
  "serde",
  "serde_cbor",
  "serde_json",
@@ -4002,6 +4005,25 @@ name = "runner-core"
 version = "0.4.59"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "330f4641a675855e786240a59df316141576171e47da3155a23b3003530baa48"
+dependencies = [
+ "anyhow",
+ "base64 0.22.1",
+ "blake3",
+ "ed25519-dalek",
+ "greentic-config-types",
+ "greentic-pack-lib",
+ "reqwest 0.13.2",
+ "semver",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "url",
+]
+
+[[package]]
+name = "runner-core"
+version = "0.4.60"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -6687,3 +6709,7 @@ dependencies = [
  "cc",
  "pkg-config",
 ]
+
+[[patch.unused]]
+name = "greentic-runner-desktop"
+version = "0.4.60"
