@@ -6,7 +6,7 @@ use std::{
 use anyhow::Context;
 use chrono::{DateTime, Utc};
 use serde::Serialize;
-use serde_json::Value;
+use serde_json::{Value, json};
 
 use crate::bin_resolver::{self, ResolveCtx};
 use crate::config::{DemoConfig, DemoProviderConfig};
@@ -188,6 +188,49 @@ pub fn run_provider_setup(
             if let Some(config_value) = qa_config_override.as_ref() {
                 input["config"] = config_value.clone();
             }
+            if let Some(config_value) = qa_config_override.as_ref() {
+                write_qa_setup_success_record(
+                    &setup_path,
+                    &provider,
+                    &setup_flow,
+                    Some(config_value),
+                )?;
+                if let Err(err) = crate::provider_config_envelope::write_provider_config_envelope(
+                    &providers_root,
+                    &provider,
+                    &setup_flow,
+                    config_value,
+                    &pack_path,
+                    options.backup,
+                ) {
+                    operator_log::warn(
+                        module_path!(),
+                        format!(
+                            "failed to write provider config envelope provider={} flow={}: {err}",
+                            provider, setup_flow
+                        ),
+                    );
+                }
+                if options.verify_webhooks {
+                    let verify_flow = cfg
+                        .verify_flow
+                        .clone()
+                        .unwrap_or_else(|| "verify_webhooks".to_string());
+                    let verify_path = providers_root.join(format!("{provider}.verify.json"));
+                    if !verify_path.exists() || options.force_setup {
+                        let output = runner_integration::run_flow(
+                            &runner,
+                            &pack_path,
+                            &verify_flow,
+                            &input,
+                        )?;
+                        write_run_output(&verify_path, &provider, &verify_flow, &output)?;
+                    }
+                }
+                let status_path = providers_root.join(format!("{provider}.status.json"));
+                write_status(&status_path, &provider, &setup_path)?;
+                return Ok(());
+            }
             let output = runner_integration::run_flow(&runner, &pack_path, &setup_flow, &input)?;
             write_run_output(&setup_path, &provider, &setup_flow, &output)?;
             if let Some(config_value) = qa_config_override
@@ -239,6 +282,36 @@ pub fn run_provider_setup(
         }
     }
 
+    Ok(())
+}
+
+pub(crate) fn write_qa_setup_success_record(
+    path: &Path,
+    provider: &str,
+    flow: &str,
+    config: Option<&Value>,
+) -> anyhow::Result<()> {
+    let record = ProviderRunRecord {
+        provider: provider.to_string(),
+        flow: flow.to_string(),
+        status: "Success".to_string(),
+        success: true,
+        stdout: String::new(),
+        stderr: String::new(),
+        parsed: Some(json!({
+            "status": "Success",
+            "flow_id": flow,
+            "pack_id": provider,
+            "mode": "component-qa",
+            "config": config.cloned().unwrap_or(Value::Null)
+        })),
+        timestamp: Utc::now(),
+    };
+    let bytes = serde_json::to_vec_pretty(&record)?;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(path, bytes)?;
     Ok(())
 }
 
@@ -338,7 +411,10 @@ fn build_input(
         "text": "Collect inputs for setup_default.",
         "user_id": "operator"
     });
-    payload["payload"] = serde_json::json!({});
+    payload["payload"] = serde_json::json!({
+        "id": format!("{pack_id}-setup_default"),
+        "spec_ref": "assets/setup.yaml"
+    });
     if let Some(answers) = answers {
         payload["setup_answers"] = answers.clone();
         payload["answers_json"] = Value::String(serde_json::to_string(answers)?);

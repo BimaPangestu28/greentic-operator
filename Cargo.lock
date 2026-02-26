@@ -1089,9 +1089,9 @@ dependencies = [
 
 [[package]]
 name = "deflate64"
-version = "0.1.10"
+version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "26bf8fc351c5ed29b5c2f0cbbac1b209b74f60ecd62e675a998df72c49af5204"
+checksum = "807800ff3288b621186fe0a8f3392c4652068257302709c24efd918c3dffcdc2"
 
 [[package]]
 name = "der"
@@ -1793,7 +1793,7 @@ dependencies = [
 
 [[package]]
 name = "greentic-operator"
-version = "0.4.30"
+version = "0.4.31"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1884,9 +1884,9 @@ dependencies = [
 
 [[package]]
 name = "greentic-runner-desktop"
-version = "0.4.59"
+version = "0.4.60"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e2c94908b10ee3e967bc7f3929e08db9c3c62de3bcedd9bb712a2419f487d2e9"
+checksum = "2e1ba26ae172039ddc372b929b4a2ff9d3ae4183f69965c6c9ba16e949872732"
 dependencies = [
  "anyhow",
  "greentic-pack-lib",
@@ -1905,9 +1905,9 @@ dependencies = [
 
 [[package]]
 name = "greentic-runner-host"
-version = "0.4.59"
+version = "0.4.60"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5f02f02ac6dd6811b70e617651eb5c127b776fb71730cc2ca8bad852e03cc725"
+checksum = "e0c572fd332fcdcc45b7a14bf2c201df35f20536a503cdfe496f5b1200a254b7"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -2741,9 +2741,9 @@ dependencies = [
 
 [[package]]
 name = "jsonschema"
-version = "0.42.1"
+version = "0.42.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6103dcd3815c9bd04239a6d0343dac2b7a18ee260e800d0a6e3eb5b9333504fb"
+checksum = "a44c9bb95f6ac9270bf4fd38d71c2f8704b9fe0323a293af7a5284cbd60a39b2"
 dependencies = [
  "ahash",
  "bytecount",
@@ -3823,9 +3823,9 @@ dependencies = [
 
 [[package]]
 name = "referencing"
-version = "0.42.1"
+version = "0.42.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1a76b0c93f3dd49da2900cfb3c6b883602471a0e3e34b1578a3310ca1269d418"
+checksum = "97d4124f489451bb67c59d67fa16f3ae9b5690b290406a7538e38458632666df"
 dependencies = [
  "ahash",
  "fluent-uri",
@@ -3999,9 +3999,9 @@ dependencies = [
 
 [[package]]
 name = "runner-core"
-version = "0.4.59"
+version = "0.4.60"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "330f4641a675855e786240a59df316141576171e47da3155a23b3003530baa48"
+checksum = "d8a912134d2a33b5a156eba3796cfe01892a3baa82db522579d5b7faa216e16a"
 dependencies = [
  "anyhow",
  "base64 0.22.1",

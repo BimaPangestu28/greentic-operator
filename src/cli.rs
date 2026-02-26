@@ -6175,6 +6175,38 @@ fn run_plan_item(
             serde_json::to_string(&input).unwrap_or_else(|_| "<invalid-json>".to_string())
         );
     }
+    if action == DomainAction::Setup
+        && let Some(config_value) = qa_config_override.as_ref()
+    {
+        let setup_path = providers_root.join(format!("{provider_id}.setup.json"));
+        crate::providers::write_qa_setup_success_record(
+            &setup_path,
+            &provider_id,
+            &item.flow_id,
+            Some(config_value),
+        )?;
+        if let Err(err) = crate::provider_config_envelope::write_provider_config_envelope(
+            &providers_root,
+            &provider_id,
+            &item.flow_id,
+            config_value,
+            &item.pack.path,
+            backup,
+        ) {
+            operator_log::warn(
+                module_path!(),
+                format!(
+                    "failed to write provider config envelope provider={} flow={}: {err}",
+                    provider_id, item.flow_id
+                ),
+            );
+        }
+        println!(
+            "{} {} -> Success (component-qa)",
+            item.pack.file_name, item.flow_id
+        );
+        return Ok(());
+    }
     if let Some(runner_binary) = runner_binary {
         let run_dir = state_layout::run_dir(state_root, domain, &item.pack.pack_id, &item.flow_id)?;
         std::fs::create_dir_all(&run_dir)?;
@@ -6495,11 +6527,26 @@ fn build_input_payload(
         "id": msg_id,
         "tenant": tenant_ctx,
         "channel": "setup",
+        "message": {
+            "id": pack_id
+                .map(|value| format!("{value}.setup_default__collect"))
+                .unwrap_or_else(|| "setup_default__collect".to_string()),
+            "text": "Collect inputs for setup_default."
+        },
         "session_id": "setup",
         "metadata": metadata,
+        "reply_scope": "",
+        "text": "Collect inputs for setup_default.",
+        "user_id": "operator",
     });
     payload["msg"] = msg;
-    payload["payload"] = serde_json::json!({});
+    let payload_id = pack_id
+        .map(|value| format!("{value}-setup_default"))
+        .unwrap_or_else(|| "setup_default".to_string());
+    payload["payload"] = serde_json::json!({
+        "id": payload_id,
+        "spec_ref": "assets/setup.yaml"
+    });
     payload
 }
 
