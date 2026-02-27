@@ -1,6 +1,6 @@
 [package]
 name = "greentic-operator"
-version = "0.4.31"
+version = "0.4.32"
 edition = "2024"
 rust-version = "1.91"
 description = "Greentic operator CLI for local dev and demo orchestration."
@@ -9,6 +9,14 @@ repository = "https://github.com/greentic-ai/greentic-operator"
 homepage = "https://github.com/greentic-ai/greentic-operator"
 readme = "README.md"
 autobins = false
+include = [
+    "src/**",
+    "i18n/operator_cli/*.json",
+    "i18n/operator_wizard/*.json",
+    "README.md",
+    "Cargo.toml",
+    "Cargo.lock",
+]
 
 [package.metadata.binstall]
 pkg-url = "{ repo }/releases/download/v{ version }/{ name }-{ target }-v{ version }.{ archive-format }"
@@ -74,5 +82,4 @@ members = [
     "secret_name",
     "crates/greentic-secrets-repro",
 ]
-
 

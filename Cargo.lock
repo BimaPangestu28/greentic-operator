@@ -1793,7 +1793,7 @@ dependencies = [
 
 [[package]]
 name = "greentic-operator"
-version = "0.4.31"
+version = "0.4.32"
 dependencies = [
  "anyhow",
  "async-trait",
