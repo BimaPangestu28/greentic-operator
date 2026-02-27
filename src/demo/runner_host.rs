@@ -264,6 +264,17 @@ impl DemoRunnerHost {
         self.debug_enabled
     }
 
+    /// Return the canonical `provider_type` stored inside a provider pack manifest
+    /// (e.g. `"messaging.webex.bot"`).  Falls back to the lookup key when the pack
+    /// is not found or the manifest cannot be read.
+    pub fn canonical_provider_type(&self, domain: Domain, lookup_key: &str) -> String {
+        if let Some(pack) = self.catalog.get(&(domain, lookup_key.to_string())) {
+            primary_provider_type(&pack.path).unwrap_or_else(|_| lookup_key.to_string())
+        } else {
+            lookup_key.to_string()
+        }
+    }
+
     pub fn resolve_capability(
         &self,
         cap_id: &str,
@@ -758,7 +769,8 @@ impl DemoRunnerHost {
         ctx: &OperatorContext,
     ) -> anyhow::Result<FlowOutcome> {
         let payload = payload_bytes.to_vec();
-        let result = make_runtime_or_thread_scope(|runtime| runtime.block_on(async {
+        let result = make_runtime_or_thread_scope(|runtime| {
+            runtime.block_on(async {
             let host_config = Arc::new(build_demo_host_config(&ctx.tenant));
             let dev_store_display = self
                 .secrets_handle
@@ -834,7 +846,8 @@ impl DemoRunnerHost {
             pack_runtime
                 .invoke_provider(&binding, exec_ctx, op_id, payload)
                 .await
-        }));
+        })
+        });
 
         match result {
             Ok(value) => Ok(FlowOutcome {
