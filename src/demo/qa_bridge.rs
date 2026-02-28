@@ -8,8 +8,8 @@
 use std::collections::{BTreeMap, HashMap};
 
 use qa_spec::{
-    FormPresentation, FormSpec, I18nText, ProgressPolicy, QuestionSpec, QuestionType,
-    ResolvedI18nMap,
+    FormSpec, I18nText, QuestionSpec, QuestionType, ResolvedI18nMap,
+    spec::{FormPresentation, ProgressPolicy},
 };
 use serde_json::Value;
 
@@ -58,9 +58,7 @@ pub fn provider_qa_to_form_spec(
         .unwrap_or_default();
 
     // Derive display name for intro
-    let display_name = provider
-        .strip_prefix("messaging-")
-        .unwrap_or(provider);
+    let display_name = provider.strip_prefix("messaging-").unwrap_or(provider);
     let display_name = capitalize(display_name);
 
     FormSpec {
@@ -111,13 +109,10 @@ fn convert_question(
     let title = i18n.get(&label_key).cloned().unwrap_or_else(|| id.clone());
 
     // Resolve description from i18n (convention: {prefix}.schema.config.{id}.description)
-    let description = description_key_for(&label_key, &id)
-        .and_then(|desc_key| i18n.get(&desc_key).cloned());
+    let description =
+        description_key_for(&label_key, &id).and_then(|desc_key| i18n.get(&desc_key).cloned());
 
-    let required = q
-        .get("required")
-        .and_then(Value::as_bool)
-        .unwrap_or(false);
+    let required = q.get("required").and_then(Value::as_bool).unwrap_or(false);
 
     // Infer type and properties from question id
     let (kind, secret, constraint) = infer_question_properties(&id);
@@ -147,7 +142,7 @@ fn convert_question(
 }
 
 /// Infer QuestionType, secret flag, and optional constraint from a question id.
-fn infer_question_properties(
+pub fn infer_question_properties(
     id: &str,
 ) -> (QuestionType, bool, Option<qa_spec::spec::Constraint>) {
     match id {
@@ -187,14 +182,11 @@ fn description_key_for(label_key: &str, question_id: &str) -> Option<String> {
 }
 
 /// Try to build the description i18n key from raw question data.
-fn description_key_for_raw(provider: &str, q: &Value) -> Option<String> {
+fn description_key_for_raw(_provider: &str, q: &Value) -> Option<String> {
     let id = q.get("id").and_then(Value::as_str)?;
     let label_key = q
         .get("label")
-        .and_then(|v| {
-            v.as_str()
-                .or_else(|| v.get("key").and_then(Value::as_str))
-        })?;
+        .and_then(|v| v.as_str().or_else(|| v.get("key").and_then(Value::as_str)))?;
     description_key_for(label_key, id)
 }
 
@@ -286,7 +278,8 @@ mod tests {
 
     #[test]
     fn converts_provider_qa_to_form_spec() {
-        let form = provider_qa_to_form_spec(&sample_qa_output(), &sample_i18n(), "messaging-telegram");
+        let form =
+            provider_qa_to_form_spec(&sample_qa_output(), &sample_i18n(), "messaging-telegram");
         assert_eq!(form.id, "messaging-telegram-setup");
         assert_eq!(form.title, "Setup");
         assert_eq!(form.questions.len(), 5);
@@ -294,7 +287,8 @@ mod tests {
 
     #[test]
     fn infers_question_types() {
-        let form = provider_qa_to_form_spec(&sample_qa_output(), &sample_i18n(), "messaging-telegram");
+        let form =
+            provider_qa_to_form_spec(&sample_qa_output(), &sample_i18n(), "messaging-telegram");
         assert_eq!(form.questions[0].kind, QuestionType::Boolean); // enabled
         assert_eq!(form.questions[1].kind, QuestionType::String); // public_base_url
         assert!(form.questions[1].constraint.is_some()); // URL constraint
@@ -303,14 +297,16 @@ mod tests {
 
     #[test]
     fn resolves_titles_from_i18n() {
-        let form = provider_qa_to_form_spec(&sample_qa_output(), &sample_i18n(), "messaging-telegram");
+        let form =
+            provider_qa_to_form_spec(&sample_qa_output(), &sample_i18n(), "messaging-telegram");
         assert_eq!(form.questions[0].title, "Enable provider");
         assert_eq!(form.questions[4].title, "Bot token");
     }
 
     #[test]
     fn resolves_descriptions_from_i18n() {
-        let form = provider_qa_to_form_spec(&sample_qa_output(), &sample_i18n(), "messaging-telegram");
+        let form =
+            provider_qa_to_form_spec(&sample_qa_output(), &sample_i18n(), "messaging-telegram");
         assert_eq!(
             form.questions[0].description.as_deref(),
             Some("Enable this provider")
@@ -326,10 +322,7 @@ mod tests {
         assert_eq!(normalize_answer("yes", QuestionType::Boolean), "true");
         assert_eq!(normalize_answer("No", QuestionType::Boolean), "false");
         assert_eq!(normalize_answer("y", QuestionType::Boolean), "true");
-        assert_eq!(
-            normalize_answer("hello", QuestionType::String),
-            "hello"
-        );
+        assert_eq!(normalize_answer("hello", QuestionType::String), "hello");
     }
 
     #[test]
@@ -337,11 +330,15 @@ mod tests {
         let i18n = sample_i18n();
         let resolved = build_resolved_i18n(&i18n);
         assert_eq!(
-            resolved.get("telegram.qa.setup.enabled").map(String::as_str),
+            resolved
+                .get("telegram.qa.setup.enabled")
+                .map(String::as_str),
             Some("Enable provider")
         );
         assert_eq!(
-            resolved.get("en:telegram.qa.setup.enabled").map(String::as_str),
+            resolved
+                .get("en:telegram.qa.setup.enabled")
+                .map(String::as_str),
             Some("Enable provider")
         );
     }

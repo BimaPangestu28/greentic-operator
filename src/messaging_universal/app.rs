@@ -131,7 +131,13 @@ pub fn run_app_flow(
     };
 
     let output = runner_exec::run_provider_pack_flow(request)?;
-    let value = collect_transcript_outputs(&output.run_dir)?
+    // Check if the envelope contains AC action routing metadata (routeToCardId/toCardId).
+    // If so, select the matching card node output from the transcript instead of the default.
+    let target_node = envelope
+        .metadata
+        .get("routeToCardId")
+        .or_else(|| envelope.metadata.get("toCardId"));
+    let value = collect_transcript_outputs(&output.run_dir, target_node.map(|s| s.as_str()))?
         .ok_or_else(|| anyhow::anyhow!("app flow produced no outputs"))?;
     parse_envelopes(&value, envelope)
 }
@@ -207,22 +213,37 @@ fn extract_text_from_map(map: &BTreeMap<CborValue, CborValue>, key: &str) -> Opt
         })
 }
 
-fn collect_transcript_outputs(run_dir: &Path) -> Result<Option<JsonValue>> {
+fn collect_transcript_outputs(
+    run_dir: &Path,
+    target_node_id: Option<&str>,
+) -> Result<Option<JsonValue>> {
     let path = run_dir.join("transcript.jsonl");
     if !path.exists() {
         return Ok(None);
     }
     let contents = std::fs::read_to_string(path)?;
-    let mut last = None;
+    let mut first = None;
+    let mut targeted = None;
     for line in contents.lines() {
         if let Ok(value) = serde_json::from_str::<JsonValue>(line)
             && let Some(outputs) = value.get("outputs")
             && !outputs.is_null()
         {
-            last = Some(outputs.clone());
+            if first.is_none() {
+                first = Some(outputs.clone());
+            }
+            // If targeting a specific card node, check node_id match.
+            if let Some(target) = target_node_id {
+                if let Some(node_id) = value.get("node_id").and_then(|n| n.as_str()) {
+                    if node_id == target {
+                        targeted = Some(outputs.clone());
+                    }
+                }
+            }
         }
     }
-    Ok(last)
+    // Targeted node takes priority; otherwise return first card (not last).
+    Ok(targeted.or(first))
 }
 
 fn parse_envelopes(
@@ -240,6 +261,27 @@ fn parse_envelopes(
             .context("app flow message payload is not a ChannelMessageEnvelope")?;
         return Ok(vec![envelope]);
     }
+    // Handle component-adaptive-card output: AdaptiveCardResult with renderedCard.
+    // Store the rendered AC JSON in metadata["adaptive_card"] (matches Teams/Slack pattern).
+    if let Some(rendered_card) = value.get("renderedCard") {
+        if !rendered_card.is_null() {
+            let mut reply = ingress_envelope.clone();
+            // Extract a brief title from the first body element for text fallback.
+            let title = rendered_card
+                .get("body")
+                .and_then(|b| b.as_array())
+                .and_then(|arr| arr.first())
+                .and_then(|e| e.get("text"))
+                .and_then(|t| t.as_str())
+                .unwrap_or("Adaptive Card");
+            reply.text = Some(title.to_string());
+            if let Ok(ac_json) = serde_json::to_string(rendered_card) {
+                reply.metadata.insert("adaptive_card".to_string(), ac_json);
+            }
+            return Ok(vec![reply]);
+        }
+    }
+
     // Fallback: wrap simple text output in a reply envelope based on the ingress message.
     // Check payload.text (runner transcript format) then text then raw string.
     if let Some(text) = value
@@ -341,7 +383,10 @@ mod tests {
         });
         let result = parse_envelopes(&output, &ingress).unwrap();
         assert_eq!(result.len(), 1);
-        assert_eq!(result[0].text.as_deref(), Some("Echo: received your message"));
+        assert_eq!(
+            result[0].text.as_deref(),
+            Some("Echo: received your message")
+        );
     }
 
     #[test]

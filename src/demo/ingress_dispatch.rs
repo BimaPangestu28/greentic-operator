@@ -162,7 +162,6 @@ fn parse_events(value: Option<&JsonValue>) -> anyhow::Result<Vec<EventEnvelopeV1
     Ok(events)
 }
 
-
 fn parse_messaging_envelopes(value: Option<&JsonValue>) -> Vec<ChannelMessageEnvelope> {
     let Some(value) = value else {
         return Vec::new();

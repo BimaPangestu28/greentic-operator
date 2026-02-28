@@ -43,6 +43,7 @@ use crate::operator_i18n;
 use crate::operator_log;
 use crate::project;
 use crate::provider_registry;
+use crate::qa_setup_wizard;
 use crate::runner_exec;
 use crate::runner_integration;
 use crate::runtime_state::RuntimePaths;
@@ -131,6 +132,8 @@ enum DemoSubcommand {
         about = "Alias of wizard. Plan or create a demo bundle from pack refs and allow rules"
     )]
     Wizard(DemoWizardArgs),
+    #[command(about = "Run interactive card-based setup wizard for a provider pack")]
+    SetupWizard(DemoSetupWizardArgs),
 }
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
@@ -538,6 +541,23 @@ struct DemoWizardArgs {
     run_setup: bool,
     #[arg(long, help = "Optional JSON/YAML setup-input passed to setup runner.")]
     setup_input: Option<PathBuf>,
+}
+
+#[derive(Parser)]
+#[command(about = "Run interactive card-based setup wizard for a provider pack.")]
+struct DemoSetupWizardArgs {
+    #[arg(long, help = "Path to the .gtpack file.")]
+    pack: PathBuf,
+    #[arg(long, help = "Provider ID (default: derived from pack manifest).")]
+    provider: Option<String>,
+    #[arg(long, default_value = "demo", help = "Tenant ID.")]
+    tenant: String,
+    #[arg(long, help = "Team ID.")]
+    team: Option<String>,
+    #[arg(long, help = "Setup flow to run (default: setup_default).")]
+    flow: Option<String>,
+    #[arg(long, help = "Path to demo bundle (for secrets resolution).")]
+    bundle: Option<PathBuf>,
 }
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
@@ -1762,6 +1782,7 @@ impl DemoCommand {
             DemoSubcommand::Capability(args) => args.run(),
             DemoSubcommand::Run(args) => args.run(ctx),
             DemoSubcommand::Wizard(args) => args.run(),
+            DemoSubcommand::SetupWizard(args) => args.run(),
         }
     }
 }
@@ -2477,6 +2498,82 @@ impl DemoPolicyArgs {
         gmap::upsert_policy(&gmap_path, &self.path, policy)?;
         project::sync_project(&self.bundle)?;
         copy_resolved_manifest(&self.bundle, &self.tenant, effective_team.as_deref())?;
+        Ok(())
+    }
+}
+
+impl DemoSetupWizardArgs {
+    fn run(self) -> anyhow::Result<()> {
+        let meta = domains::read_pack_meta(&self.pack)
+            .with_context(|| format!("failed to read pack {}", self.pack.display()))?;
+        let provider_id = self.provider.unwrap_or(meta.pack_id);
+        let setup_flow = self.flow.unwrap_or_else(|| "setup_default".to_string());
+
+        // 1. Collect answers via card wizard
+        let answers = qa_setup_wizard::run_interactive_card_wizard(&self.pack, &provider_id)?;
+
+        // 2. Build input payload with collected answers
+        let input = json!({
+            "tenant": &self.tenant,
+            "team": self.team.as_deref().unwrap_or("default"),
+            "id": &provider_id,
+            "setup_answers": &answers,
+            "config": { "id": &provider_id },
+            "msg": {
+                "id": format!("{provider_id}.setup"),
+                "tenant": { "env": "dev", "tenant": &self.tenant },
+                "channel": "setup",
+                "session_id": "setup",
+            },
+            "payload": {},
+        });
+
+        println!("\nRunning flow '{setup_flow}' with collected answers...");
+
+        // 3. Resolve secrets manager
+        let secrets_manager = if let Some(bundle) = &self.bundle {
+            secrets_gate::resolve_secrets_manager(bundle, &self.tenant, self.team.as_deref())?
+                .runtime_manager(Some(&provider_id))
+        } else {
+            default_manager()?
+        };
+
+        // 4. Run the setup flow via DemoRunner
+        let mut runner = DemoRunner::with_entry_flow(
+            self.pack.clone(),
+            &self.tenant,
+            self.team.clone(),
+            setup_flow.clone(),
+            provider_id.clone(),
+            input,
+            secrets_manager,
+        )?;
+
+        match runner.run_until_blocked() {
+            demo::DemoBlockedOn::Finished(output) => {
+                println!("\nFlow '{setup_flow}' completed:");
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&output)
+                        .unwrap_or_else(|_| "<invalid>".into())
+                );
+            }
+            demo::DemoBlockedOn::Waiting { reason, output, .. } => {
+                println!(
+                    "\nFlow '{setup_flow}' is waiting for input: {}",
+                    reason.as_deref().unwrap_or("unknown")
+                );
+                println!(
+                    "Output so far: {}",
+                    serde_json::to_string_pretty(&output)
+                        .unwrap_or_else(|_| "<invalid>".into())
+                );
+            }
+            demo::DemoBlockedOn::Error(err) => {
+                return Err(err.context(format!("flow '{setup_flow}' failed")));
+            }
+        }
+
         Ok(())
     }
 }
@@ -6061,15 +6158,17 @@ fn run_plan_item(
         }
     }
 
-    let setup_values = if action == DomainAction::Setup {
-        Some(collect_setup_answers(
+    let (setup_values, qa_form_spec) = if action == DomainAction::Setup {
+        let (answers, form_spec) = qa_setup_wizard::run_qa_setup(
             &item.pack.path,
             &item.pack.pack_id,
             setup_answers,
             interactive,
-        )?)
+            None, // no pre-built FormSpec; will try setup.yaml fallback
+        )?;
+        (Some(answers), form_spec)
     } else {
-        None
+        (None, None)
     };
     let providers_root = state_root
         .join("state")
@@ -6147,6 +6246,28 @@ fn run_plan_item(
     } else {
         None
     };
+
+    // Persist secrets and config from QA results when FormSpec is available
+    if let Some(ref config) = qa_config_override
+        && let Some(ref form_spec) = qa_form_spec
+        && action == DomainAction::Setup
+        && let Err(err) = crate::qa_persist::persist_qa_config(
+            &providers_root,
+            &provider_id,
+            config,
+            &item.pack.path,
+            form_spec,
+            backup,
+        )
+    {
+        operator_log::warn(
+            module_path!(),
+            format!(
+                "failed to persist qa config provider={}: {err}",
+                provider_id
+            ),
+        );
+    }
 
     let public_base_url_ref = public_base_url.as_deref().map(|value| value.as_str());
     let mut input = build_input_payload(
