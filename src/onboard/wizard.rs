@@ -28,8 +28,10 @@ pub fn get_form_spec(
         .as_str()
         .ok_or_else(|| error_response(StatusCode::BAD_REQUEST, "missing provider_id"))?;
     let domain = parse_domain(body)?;
-    let tenant = body["tenant"].as_str().unwrap_or("default");
-    let team = body["team"].as_str();
+    let tenant_owned = body["tenant"].as_str().unwrap_or("default").to_ascii_lowercase();
+    let tenant = tenant_owned.as_str();
+    let team_owned = body["team"].as_str().map(|s| s.to_ascii_lowercase());
+    let team = team_owned.as_deref();
     let answers = body.get("answers").cloned().unwrap_or_else(|| json!({}));
 
     let locale = body["locale"].as_str().unwrap_or("en");
@@ -106,8 +108,10 @@ pub fn validate_answers(
         .as_str()
         .ok_or_else(|| error_response(StatusCode::BAD_REQUEST, "missing provider_id"))?;
     let domain = parse_domain(body)?;
-    let tenant = body["tenant"].as_str().unwrap_or("default");
-    let team = body["team"].as_str();
+    let tenant_owned = body["tenant"].as_str().unwrap_or("default").to_ascii_lowercase();
+    let tenant = tenant_owned.as_str();
+    let team_owned = body["team"].as_str().map(|s| s.to_ascii_lowercase());
+    let team = team_owned.as_deref();
     let answers = body.get("answers").cloned().unwrap_or_else(|| json!({}));
     let locale = body["locale"].as_str().unwrap_or("en");
     let mode = parse_mode(body);
@@ -155,8 +159,10 @@ pub fn submit_answers(
         .as_str()
         .ok_or_else(|| error_response(StatusCode::BAD_REQUEST, "missing provider_id"))?;
     let domain = parse_domain(body)?;
-    let tenant = body["tenant"].as_str().unwrap_or("default");
-    let team = body["team"].as_str();
+    let tenant_owned = body["tenant"].as_str().unwrap_or("default").to_ascii_lowercase();
+    let tenant = tenant_owned.as_str();
+    let team_owned = body["team"].as_str().map(|s| s.to_ascii_lowercase());
+    let team = team_owned.as_deref();
     let answers = body.get("answers").cloned().unwrap_or_else(|| json!({}));
 
     let bundle_root = state.runner_host.bundle_root();
@@ -205,7 +211,7 @@ pub fn submit_answers(
         )
     })?;
 
-    let config = match config {
+    let mut config = match config {
         Some(config) => config,
         None => {
             // No WASM QA contract — use answers directly as config
@@ -213,17 +219,67 @@ pub fn submit_answers(
         }
     };
 
+    // Re-inject UI-level fields that WASM may have stripped
+    if let Some(map) = config.as_object_mut() {
+        // instance_label: user-friendly name for the provider instance
+        if let Some(label) = answers.get("instance_label").and_then(Value::as_str) {
+            if !label.is_empty() {
+                map.insert("instance_label".to_string(), Value::String(label.to_string()));
+            }
+        }
+        // Persist deployment scope so upgrade can restore it
+        map.insert("_scope_tenant".to_string(), Value::String(tenant.to_string()));
+        if let Some(t) = team {
+            map.insert("_scope_team".to_string(), Value::String(t.to_string()));
+        }
+    }
+
     // 2. Get FormSpec (for secret field identification — locale not needed here)
-    let form_spec = match get_form_spec_from_pack(bundle_root, domain, &pack, provider_id, tenant, team, "en", mode) {
+    let mut form_spec = match get_form_spec_from_pack(bundle_root, domain, &pack, provider_id, tenant, team, "en", mode) {
         Some(spec) => spec,
         None => setup_to_formspec::pack_to_form_spec(&pack.path, provider_id)
             .unwrap_or_else(|| make_minimal_form_spec(provider_id, &config)),
     };
 
-    // 3. Persist secrets + config
+    // 3. Inject secret aliases into config + FormSpec so they're persisted in the same batch
+    //    (avoids DEK cache bug from separate DevStore instances)
+    if provider_id == "messaging-telegram" {
+        if let Some(token) = config.get("bot_token").and_then(Value::as_str).map(String::from) {
+            if !token.is_empty() {
+                if let Some(map) = config.as_object_mut() {
+                    map.entry("telegram_bot_token".to_string())
+                        .or_insert_with(|| Value::String(token));
+                }
+                // Add synthetic secret question so persist picks it up
+                if !form_spec.questions.iter().any(|q| q.id == "telegram_bot_token") {
+                    form_spec.questions.push(qa_spec::QuestionSpec {
+                        id: "telegram_bot_token".to_string(),
+                        kind: qa_spec::QuestionType::String,
+                        title: "telegram_bot_token".to_string(),
+                        title_i18n: None,
+                        description: None,
+                        description_i18n: None,
+                        required: false,
+                        choices: None,
+                        default_value: None,
+                        secret: true,
+                        visible_if: None,
+                        constraint: None,
+                        list: None,
+                        computed: None,
+                        policy: Default::default(),
+                        computed_overridable: false,
+                    });
+                }
+            }
+        }
+    }
+
+    // Persist secrets + config (single DevStore instance writes all secrets in one batch)
     let providers_root = bundle_root.join(".providers");
-    let persist_result = tokio::task::block_in_place(|| {
-        tokio::runtime::Handle::current().block_on(qa_persist::persist_qa_results(
+    let rt = tokio::runtime::Runtime::new().expect("persist runtime");
+    let persist_result = rt
+        .block_on(qa_persist::persist_qa_results(
             bundle_root,
             &providers_root,
             tenant,
@@ -234,8 +290,7 @@ pub fn submit_answers(
             &form_spec,
             true,
         ))
-    })
-    .map_err(|err| {
+        .map_err(|err| {
         operator_log::error(
             module_path!(),
             format!("[onboard] persist failed: {err}"),
@@ -279,6 +334,15 @@ pub fn submit_answers(
     let mut setup_flow_result: Option<Value> = None;
     let mut verify_flow_result: Option<Value> = None;
     let webhook_result;
+
+    // Inject runtime-detected public URL into config if not already set
+    let runtime_url = read_runtime_public_url(bundle_root, tenant, team);
+    if let Some(ref url) = runtime_url {
+        if let Some(map) = config.as_object_mut() {
+            map.entry("public_base_url".to_string())
+                .or_insert_with(|| Value::String(url.clone()));
+        }
+    }
 
     if mode != QaMode::Remove {
         let has_setup_flow = pack.entry_flows.iter().any(|f| f == "setup_default");
@@ -367,8 +431,10 @@ pub fn submit_answers(
                 }
             }
 
-            // Setup flows handle webhook registration natively, skip manual webhook
-            webhook_result = None;
+            // Also call native webhook setup (WASM flows are templates, not actual API calls)
+            webhook_result = try_provider_setup_webhook(
+                bundle_root, domain, &pack, provider_id, tenant, team, &config,
+            );
         } else {
             // No setup flow in pack — fall back to manual webhook setup
             webhook_result = try_provider_setup_webhook(
@@ -802,7 +868,7 @@ fn try_provider_setup_webhook(
     _domain: Domain,
     _pack: &ProviderPack,
     provider_id: &str,
-    _tenant: &str,
+    tenant: &str,
     _team: Option<&str>,
     config: &Value,
 ) -> Option<Value> {
@@ -811,19 +877,21 @@ fn try_provider_setup_webhook(
         return None;
     }
 
+    let team = _team.unwrap_or("default");
+
     // Dispatch based on provider type
     let provider_short = provider_id
         .strip_prefix("messaging-")
         .unwrap_or(provider_id);
 
     match provider_short {
-        "telegram" => setup_telegram_webhook(config, public_base_url),
+        "telegram" => setup_telegram_webhook(config, public_base_url, provider_id, tenant, team),
         _ => None,
     }
 }
 
 /// Call Telegram Bot API `setWebhook` to register the webhook URL.
-fn setup_telegram_webhook(config: &Value, public_base_url: &str) -> Option<Value> {
+fn setup_telegram_webhook(config: &Value, public_base_url: &str, provider_id: &str, tenant: &str, team: &str) -> Option<Value> {
     let bot_token = config.get("bot_token").and_then(Value::as_str)?;
     if bot_token.is_empty() {
         return Some(json!({"ok": false, "error": "bot_token is empty"}));
@@ -832,12 +900,15 @@ fn setup_telegram_webhook(config: &Value, public_base_url: &str) -> Option<Value
     let api_base = config
         .get("api_base_url")
         .and_then(Value::as_str)
-        .filter(|s| !s.is_empty())
+        .filter(|s| !s.is_empty() && s.contains("telegram.org"))
         .unwrap_or("https://api.telegram.org");
 
     let webhook_url = format!(
-        "{}/messaging/telegram",
-        public_base_url.trim_end_matches('/')
+        "{}/v1/messaging/ingress/{}/{}/{}",
+        public_base_url.trim_end_matches('/'),
+        provider_id,
+        tenant,
+        team,
     );
 
     let url = format!("{api_base}/bot{bot_token}/setWebhook");
@@ -846,9 +917,14 @@ fn setup_telegram_webhook(config: &Value, public_base_url: &str) -> Option<Value
         "allowed_updates": ["message", "callback_query", "edited_message"]
     });
 
+    let token_preview = if bot_token.len() > 10 {
+        format!("{}...{}", &bot_token[..5], &bot_token[bot_token.len()-4..])
+    } else {
+        "***".to_string()
+    };
     operator_log::info(
         module_path!(),
-        format!("[onboard] telegram setWebhook url={}", webhook_url),
+        format!("[onboard] telegram setWebhook url={} token_preview={} api={}", webhook_url, token_preview, api_base),
     );
 
     match ureq::post(&url)
@@ -857,7 +933,12 @@ fn setup_telegram_webhook(config: &Value, public_base_url: &str) -> Option<Value
     {
         Ok(mut resp) => {
             let status = resp.status().as_u16();
-            let resp_body: Value = resp.body_mut().read_json().unwrap_or(Value::Null);
+            let raw_body = resp.body_mut().read_to_string().unwrap_or_default();
+            operator_log::info(
+                module_path!(),
+                format!("[onboard] telegram setWebhook response status={} body={}", status, raw_body),
+            );
+            let resp_body: Value = serde_json::from_str(&raw_body).unwrap_or(Value::Null);
             let tg_ok = resp_body.get("ok").and_then(Value::as_bool).unwrap_or(false);
             let description = resp_body
                 .get("description")

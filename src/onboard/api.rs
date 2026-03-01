@@ -56,7 +56,14 @@ pub async fn handle_onboard_request(
         }
         (Method::POST, "/qa/submit") => {
             let body = read_json_body(req).await?;
-            wizard::submit_answers(&state, &body)
+            // Run on a dedicated thread to avoid nested Tokio runtime panics.
+            // submit_answers → invoke_provider_op → run_pack_with_options
+            // all create their own Runtime::new(), which panics on a Tokio worker.
+            std::thread::scope(|s| {
+                s.spawn(|| wizard::submit_answers(&state, &body))
+                    .join()
+                    .expect("submit thread panicked")
+            })
         }
         (Method::POST, "/tenants/create") => {
             let body = read_json_body(req).await?;

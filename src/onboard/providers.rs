@@ -145,35 +145,46 @@ pub fn deployment_status(
                     if provider_id.starts_with('_') {
                         continue;
                     }
-                    // Look for config files inside
+                    // Look for config files inside (yaml, json, cbor — skip .bak)
                     let mut config_files = Vec::new();
                     if let Ok(config_entries) = std::fs::read_dir(entry.path()) {
                         for config_entry in config_entries.flatten() {
                             let name = config_entry.file_name().to_string_lossy().to_string();
-                            if name.ends_with(".yaml") || name.ends_with(".json") {
+                            if name.ends_with(".bak") {
+                                continue;
+                            }
+                            if name.ends_with(".yaml")
+                                || name.ends_with(".json")
+                                || name.ends_with(".cbor")
+                            {
                                 config_files.push(name);
                             }
                         }
                     }
-                    // Try to read instance_label from config
-                    let instance_label = config_files.iter().find_map(|f| {
-                        let path = entry.path().join(f);
-                        let content = std::fs::read_to_string(&path).ok()?;
-                        if f.ends_with(".json") {
-                            let val: Value = serde_json::from_str(&content).ok()?;
-                            val.get("instance_label").and_then(Value::as_str).map(String::from)
-                        } else {
-                            let val: Value = serde_yaml_bw::from_str(&content).ok()?;
-                            val.get("instance_label").and_then(Value::as_str).map(String::from)
-                        }
-                    });
+                    // Read metadata from config envelope
+                    let envelope_config = crate::provider_config_envelope::read_provider_config_envelope(
+                        &providers_dir,
+                        &provider_id,
+                    )
+                    .ok()
+                    .flatten()
+                    .map(|env| env.config);
+
                     let mut entry_json = json!({
                         "provider_id": provider_id,
                         "configured": true,
                         "config_files": config_files,
                     });
-                    if let Some(label) = instance_label {
-                        entry_json["instance_label"] = Value::String(label);
+                    if let Some(ref cfg) = envelope_config {
+                        if let Some(label) = cfg.get("instance_label").and_then(Value::as_str) {
+                            entry_json["instance_label"] = Value::String(label.to_string());
+                        }
+                        if let Some(t) = cfg.get("_scope_tenant").and_then(Value::as_str) {
+                            entry_json["scope_tenant"] = Value::String(t.to_string());
+                        }
+                        if let Some(t) = cfg.get("_scope_team").and_then(Value::as_str) {
+                            entry_json["scope_team"] = Value::String(t.to_string());
+                        }
                     }
                     deployed.push(entry_json);
                 }
@@ -206,7 +217,8 @@ pub fn create_tenant(
     let tenant = body["tenant"]
         .as_str()
         .unwrap_or("")
-        .trim();
+        .trim()
+        .to_ascii_lowercase();
 
     if tenant.is_empty() {
         return Err(error_response(
@@ -214,7 +226,7 @@ pub fn create_tenant(
             "tenant name is required",
         ));
     }
-    if !is_valid_identifier(tenant) {
+    if !is_valid_identifier(&tenant) {
         return Err(error_response(
             StatusCode::BAD_REQUEST,
             "tenant name must be alphanumeric with hyphens only",
@@ -222,7 +234,7 @@ pub fn create_tenant(
     }
 
     let bundle_root = state.runner_host.bundle_root();
-    crate::project::add_tenant(bundle_root, tenant).map_err(|err| {
+    crate::project::add_tenant(bundle_root, &tenant).map_err(|err| {
         operator_log::error(
             module_path!(),
             format!("[onboard] create tenant {tenant}: {err}"),
@@ -252,11 +264,13 @@ pub fn create_team(
     let tenant = body["tenant"]
         .as_str()
         .unwrap_or("")
-        .trim();
+        .trim()
+        .to_ascii_lowercase();
     let team = body["team"]
         .as_str()
         .unwrap_or("")
-        .trim();
+        .trim()
+        .to_ascii_lowercase();
 
     if tenant.is_empty() {
         return Err(error_response(
@@ -270,13 +284,13 @@ pub fn create_team(
             "team name is required",
         ));
     }
-    if !is_valid_identifier(tenant) {
+    if !is_valid_identifier(&tenant) {
         return Err(error_response(
             StatusCode::BAD_REQUEST,
             "tenant name must be alphanumeric with hyphens only",
         ));
     }
-    if !is_valid_identifier(team) {
+    if !is_valid_identifier(&team) {
         return Err(error_response(
             StatusCode::BAD_REQUEST,
             "team name must be alphanumeric with hyphens only",
@@ -284,7 +298,7 @@ pub fn create_team(
     }
 
     let bundle_root = state.runner_host.bundle_root();
-    crate::project::add_team(bundle_root, tenant, team).map_err(|err| {
+    crate::project::add_team(bundle_root, &tenant, &team).map_err(|err| {
         operator_log::error(
             module_path!(),
             format!("[onboard] create team {tenant}/{team}: {err}"),
