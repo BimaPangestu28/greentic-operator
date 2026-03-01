@@ -157,9 +157,16 @@ enum CloudflaredModeArg {
 }
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
+enum NgrokModeArg {
+    On,
+    Off,
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
 enum RestartTarget {
     All,
     Cloudflared,
+    Ngrok,
     Nats,
     Gateway,
     Egress,
@@ -280,6 +287,14 @@ struct DemoUpArgs {
         help = "Explicit path to the cloudflared binary used when cloudflared mode is on."
     )]
     cloudflared_binary: Option<PathBuf>,
+    #[arg(long, value_enum, default_value_t = NgrokModeArg::Off, help_heading = "Optional options", help = "Whether to start ngrok for webhook tunneling (alternative to cloudflared).")]
+    ngrok: NgrokModeArg,
+    #[arg(
+        long,
+        help_heading = "Optional options",
+        help = "Explicit path to the ngrok binary used when ngrok mode is on."
+    )]
+    ngrok_binary: Option<PathBuf>,
     #[arg(
         long,
         value_enum,
@@ -1946,12 +1961,32 @@ impl DemoUpArgs {
                 }
             };
 
+            let mut ngrok_config = match self.ngrok {
+                NgrokModeArg::Off => None,
+                NgrokModeArg::On => {
+                    let explicit = self.ngrok_binary.clone();
+                    let binary = bin_resolver::resolve_binary(
+                        "ngrok",
+                        &ResolveCtx {
+                            config_dir: bundle.clone(),
+                            explicit_path: explicit,
+                        },
+                    )?;
+                    Some(crate::ngrok::NgrokConfig {
+                        binary,
+                        local_port: 8080,
+                        extra_args: Vec::new(),
+                        restart: restart.contains("ngrok"),
+                    })
+                }
+            };
+
             let mut public_base_url = self.public_base_url.clone();
             let team_id = self
                 .team
                 .clone()
                 .unwrap_or_else(|| DEMO_DEFAULT_TEAM.to_string());
-            let mut started_cloudflared_early = false;
+            let mut started_tunnel_early = false;
             if public_base_url.is_none()
                 && self.setup_input.is_some()
                 && let Some(cfg) = cloudflared_config.as_mut()
@@ -1989,10 +2024,50 @@ impl DemoUpArgs {
                     )
                 );
                 public_base_url = Some(handle.url.clone());
-                started_cloudflared_early = true;
+                started_tunnel_early = true;
             }
 
-            if started_cloudflared_early && let Some(cfg) = cloudflared_config.as_mut() {
+            if public_base_url.is_none()
+                && self.setup_input.is_some()
+                && let Some(cfg) = ngrok_config.as_mut()
+            {
+                let paths = RuntimePaths::new(&state_dir, &tenant, &team_id);
+                let setup_log = operator_log::reserve_service_log(&log_dir, "ngrok")
+                    .with_context(|| "unable to open ngrok.log")?;
+                operator_log::info(
+                    module_path!(),
+                    format!("starting setup-mode ngrok log={}", setup_log.display()),
+                );
+                let handle = crate::ngrok::start_tunnel(&paths, cfg, &setup_log)?;
+                operator_log::info(
+                    module_path!(),
+                    format!(
+                        "ngrok setup mode ready url={} log={}",
+                        handle.url,
+                        setup_log.display()
+                    ),
+                );
+                let domain_labels = domains_to_setup
+                    .iter()
+                    .map(|domain| domains::domain_name(*domain))
+                    .collect::<Vec<_>>()
+                    .join(",");
+                println!(
+                    "{}",
+                    operator_i18n::trf(
+                        "cli.start.public_url_setup_domains",
+                        "Public URL (ngrok setup domains={}): {}",
+                        &[&domain_labels, &handle.url]
+                    )
+                );
+                public_base_url = Some(handle.url.clone());
+                started_tunnel_early = true;
+            }
+
+            if started_tunnel_early && let Some(cfg) = cloudflared_config.as_mut() {
+                cfg.restart = false;
+            }
+            if started_tunnel_early && let Some(cfg) = ngrok_config.as_mut() {
                 cfg.restart = false;
             }
 
@@ -2028,6 +2103,7 @@ impl DemoUpArgs {
                             nats_mode,
                             messaging_enabled,
                             cloudflared_config.clone(),
+                            ngrok_config.clone(),
                             &log_dir,
                             debug_enabled,
                         )
@@ -2218,6 +2294,25 @@ impl DemoUpArgs {
                 })
             }
         };
+        let ngrok = match self.ngrok {
+            NgrokModeArg::Off => None,
+            NgrokModeArg::On => {
+                let explicit = self.ngrok_binary.clone();
+                let binary = bin_resolver::resolve_binary(
+                    "ngrok",
+                    &ResolveCtx {
+                        config_dir: config_dir.clone(),
+                        explicit_path: explicit,
+                    },
+                )?;
+                Some(crate::ngrok::NgrokConfig {
+                    binary,
+                    local_port: demo_config.services.gateway.port,
+                    extra_args: Vec::new(),
+                    restart: restart.contains("ngrok"),
+                })
+            }
+        };
 
         let provider_setup_input = self.setup_input.clone();
         let timer_runner_binary = self.runner_binary.clone();
@@ -2242,6 +2337,7 @@ impl DemoUpArgs {
             &config_path,
             &demo_config,
             cloudflared,
+            ngrok,
             &restart,
             provider_options,
             &log_dir,
@@ -5244,6 +5340,7 @@ fn restart_name(target: &RestartTarget) -> String {
     match target {
         RestartTarget::All => "all",
         RestartTarget::Cloudflared => "cloudflared",
+        RestartTarget::Ngrok => "ngrok",
         RestartTarget::Nats => "nats",
         RestartTarget::Gateway => "gateway",
         RestartTarget::Egress => "egress",
@@ -6672,6 +6769,7 @@ fn read_public_base_url(root: &Path, tenant: &str, team: Option<&str>) -> Option
     let path = crate::cloudflared::public_url_path(&paths);
     let contents = std::fs::read_to_string(path).ok()?;
     crate::cloudflared::parse_public_url(&contents)
+        .or_else(|| crate::ngrok::parse_public_url(&contents))
 }
 
 fn parse_kv(input: &str) -> anyhow::Result<(String, JsonValue)> {

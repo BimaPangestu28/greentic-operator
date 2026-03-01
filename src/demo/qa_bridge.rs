@@ -117,6 +117,17 @@ fn convert_question(
     // Infer type and properties from question id
     let (kind, secret, constraint) = infer_question_properties(&id);
 
+    // Use explicit default from provider QaSpec, fall back to inferred default
+    let default_value = q
+        .get("default")
+        .and_then(|v| match v {
+            Value::String(s) => Some(s.clone()),
+            Value::Bool(b) => Some(b.to_string()),
+            Value::Number(n) => Some(n.to_string()),
+            _ => None,
+        })
+        .or_else(|| infer_default(&kind));
+
     Some(QuestionSpec {
         id,
         kind,
@@ -130,7 +141,7 @@ fn convert_question(
             .map(|key| I18nText { key, args: None }),
         required,
         choices: None,
-        default_value: infer_default(&kind),
+        default_value,
         secret,
         visible_if: None,
         constraint,
