@@ -67,7 +67,7 @@ use crate::cards::CardRenderer;
 use crate::discovery;
 use crate::domains::{self, Domain, ProviderPack};
 use crate::operator_log;
-use crate::secrets_gate::{DynSecretsManager, SecretsManagerHandle};
+use crate::secrets_gate::{self, DynSecretsManager, SecretsManagerHandle};
 use crate::secrets_manager;
 use crate::state_layout;
 
@@ -772,8 +772,15 @@ impl DemoRunnerHost {
         let result = make_runtime_or_thread_scope(|runtime| {
             runtime.block_on(async {
             let host_config = Arc::new(build_demo_host_config(&ctx.tenant));
-            let dev_store_display = self
-                .secrets_handle
+            // Re-open the dev store on each invocation so newly-written secrets
+            // (e.g. from QA wizard submit) are visible without restarting the demo.
+            let fresh_secrets = secrets_gate::resolve_secrets_manager(
+                &self.bundle_root,
+                &ctx.tenant,
+                ctx.team.as_deref(),
+            )
+            .unwrap_or_else(|_| self.secrets_handle.clone());
+            let dev_store_display = fresh_secrets
                 .dev_store_path
                 .as_ref()
                 .map(|path| path.display().to_string())
@@ -782,14 +789,14 @@ impl DemoRunnerHost {
                 module_path!(),
                 format!(
                     "secrets backend for wasm: using_env_fallback={} dev_store={}",
-                    self.secrets_handle.using_env_fallback, dev_store_display,
+                    fresh_secrets.using_env_fallback, dev_store_display,
                 ),
             );
             operator_log::info(
                 module_path!(),
                 format!(
                     "exec secrets: dev_store={} env_fallback={}",
-                    dev_store_display, self.secrets_handle.using_env_fallback,
+                    dev_store_display, fresh_secrets.using_env_fallback,
                 ),
             );
             let pack_runtime = PackRuntime::load(
@@ -800,7 +807,7 @@ impl DemoRunnerHost {
                 None::<DynSessionStore>,
                 Some(self.state_store.clone()),
                 Arc::new(RunnerWasiPolicy::default()),
-                self.secrets_handle.runtime_manager(Some(&pack.pack_id)),
+                fresh_secrets.runtime_manager(Some(&pack.pack_id)),
                 None,
                 false,
                 ComponentResolution::default(),

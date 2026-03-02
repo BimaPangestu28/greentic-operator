@@ -29,14 +29,15 @@ pub async fn persist_qa_secrets(
     config: &Value,
     form_spec: &FormSpec,
 ) -> Result<Vec<String>> {
-    let secret_ids: Vec<&str> = form_spec
+    // Collect all question IDs — WASM components read both secret and non-secret
+    // config values via the secrets API, so we must persist everything.
+    let all_question_ids: Vec<&str> = form_spec
         .questions
         .iter()
-        .filter(|q| q.secret)
         .map(|q| q.id.as_str())
         .collect();
 
-    if secret_ids.is_empty() {
+    if all_question_ids.is_empty() {
         return Ok(vec![]);
     }
 
@@ -47,7 +48,7 @@ pub async fn persist_qa_secrets(
     let mut entries = Vec::new();
     let mut saved_keys = Vec::new();
 
-    for &key in &secret_ids {
+    for &key in &all_question_ids {
         if let Some(value) = config_map.get(key) {
             let text = match value {
                 Value::String(s) => s.clone(),
