@@ -55,7 +55,11 @@ fn parse_request(body: &Value) -> Result<RequestParams, Response<Full<Bytes>>> {
     Ok(RequestParams { provider_id, domain, tenant, team, answers, locale, mode })
 }
 
-// ── FormSpec loading with WASM → setup.yaml fallback ────────────────────────
+// ── FormSpec loading with setup.yaml → WASM fallback ────────────────────────
+//
+// Prefer setup.yaml from the pack assets because it is easier to update
+// (no WASM rebuild needed) and serves as the canonical source of truth for
+// provider configuration fields.
 
 fn load_form_spec_with_fallback(
     bundle_root: &std::path::Path,
@@ -63,6 +67,16 @@ fn load_form_spec_with_fallback(
     pack: &ProviderPack,
     params: &RequestParams,
 ) -> Option<qa_spec::FormSpec> {
+    // Try setup.yaml first (canonical, easy to update)
+    if let Some(mut spec) = setup_to_formspec::pack_to_form_spec(&pack.path, &params.provider_id) {
+        operator_log::info(
+            module_path!(),
+            format!("[onboard] qa/spec path=setup.yaml provider={} questions={}", params.provider_id, spec.questions.len()),
+        );
+        apply_i18n_to_form_spec(&mut spec, bundle_root, &params.provider_id, &params.locale, params.mode.as_str());
+        return Some(spec);
+    }
+    // Fallback to WASM qa-spec op
     match get_form_spec_from_pack(
         bundle_root, domain, pack, &params.provider_id,
         params.tenant(), params.team(), &params.locale, params.mode,
@@ -77,11 +91,9 @@ fn load_form_spec_with_fallback(
         None => {
             operator_log::info(
                 module_path!(),
-                format!("[onboard] qa/spec path=fallback provider={} pack={}", params.provider_id, pack.path.display()),
+                format!("[onboard] qa/spec: no setup.yaml or wasm qa-spec for {}", params.provider_id),
             );
-            let mut spec = setup_to_formspec::pack_to_form_spec(&pack.path, &params.provider_id)?;
-            apply_i18n_to_form_spec(&mut spec, bundle_root, &params.provider_id, &params.locale, params.mode.as_str());
-            Some(spec)
+            None
         }
     }
 }
