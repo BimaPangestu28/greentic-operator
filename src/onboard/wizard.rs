@@ -10,6 +10,10 @@ use crate::qa_persist;
 use crate::setup_to_formspec;
 
 use qa_spec::{build_render_payload, render_json_ui};
+use qa_spec::convert::{
+    build_setup_flow_input, make_minimal_form_spec, parse_mode, push_synthetic_question,
+    resolve_gmap_path,
+};
 
 use super::api::{OnboardState, error_response, json_ok};
 use super::webhook_setup;
@@ -157,30 +161,6 @@ fn inject_provider_aliases(
             }
         }
     }
-}
-
-fn push_synthetic_question(form_spec: &mut qa_spec::FormSpec, key: &str, secret: bool) {
-    if form_spec.questions.iter().any(|q| q.id == key) {
-        return;
-    }
-    form_spec.questions.push(qa_spec::QuestionSpec {
-        id: key.to_string(),
-        kind: qa_spec::QuestionType::String,
-        title: key.to_string(),
-        title_i18n: None,
-        description: None,
-        description_i18n: None,
-        required: false,
-        choices: None,
-        default_value: None,
-        secret,
-        visible_if: None,
-        constraint: None,
-        list: None,
-        computed: None,
-        policy: Default::default(),
-        computed_overridable: false,
-    });
 }
 
 // ── Provider flow invocation (dedup setup_default + verify_webhooks) ────────
@@ -693,53 +673,6 @@ fn fetch_i18n_bundle(
         .unwrap_or_default()
 }
 
-fn make_minimal_form_spec(provider_id: &str, config: &Value) -> qa_spec::FormSpec {
-    use qa_spec::{FormSpec, QuestionSpec};
-
-    let questions = config
-        .as_object()
-        .map(|map| {
-            map.keys()
-                .map(|key| {
-                    let (kind, secret, _) = setup_to_formspec::infer_question_properties(key);
-                    QuestionSpec {
-                        id: key.clone(),
-                        kind,
-                        title: key.clone(),
-                        title_i18n: None,
-                        description: None,
-                        description_i18n: None,
-                        required: false,
-                        choices: None,
-                        default_value: None,
-                        secret,
-                        visible_if: None,
-                        constraint: None,
-                        list: None,
-                        computed: None,
-                        policy: Default::default(),
-                        computed_overridable: false,
-                    }
-                })
-                .collect()
-        })
-        .unwrap_or_default();
-
-    FormSpec {
-        id: format!("{provider_id}-setup"),
-        title: format!("{provider_id} setup"),
-        version: "1.0.0".to_string(),
-        description: None,
-        presentation: None,
-        progress_policy: None,
-        secrets_policy: None,
-        store: vec![],
-        validations: vec![],
-        includes: vec![],
-        questions,
-    }
-}
-
 fn apply_i18n_to_form_spec(
     form_spec: &mut qa_spec::FormSpec,
     bundle_root: &std::path::Path,
@@ -833,15 +766,6 @@ fn parse_domain(body: &Value) -> Result<Domain, Response<Full<Bytes>>> {
     }
 }
 
-fn parse_mode(body: &Value) -> QaMode {
-    match body["mode"].as_str().unwrap_or("setup") {
-        "upgrade" => QaMode::Upgrade,
-        "remove" => QaMode::Remove,
-        "default" => QaMode::Default,
-        _ => QaMode::Setup,
-    }
-}
-
 fn merge_existing_config(
     bundle_root: &std::path::Path,
     provider_id: &str,
@@ -902,73 +826,3 @@ fn read_runtime_public_url(
     best.map(|(_, url)| url)
 }
 
-fn build_setup_flow_input(
-    pack_id: &str,
-    tenant: &str,
-    team: Option<&str>,
-    public_base_url: Option<&str>,
-    config: &Value,
-) -> Value {
-    let team_str = team.unwrap_or("_");
-    let mut payload = json!({
-        "id": pack_id,
-        "tenant": tenant,
-        "team": team_str,
-        "env": "dev",
-    });
-    let mut cfg = config.clone();
-    if let Some(url) = public_base_url {
-        payload["public_base_url"] = Value::String(url.to_string());
-        if let Some(map) = cfg.as_object_mut() {
-            map.entry("public_base_url".to_string())
-                .or_insert_with(|| Value::String(url.to_string()));
-        }
-    }
-    if let Some(map) = cfg.as_object_mut() {
-        map.entry("id".to_string())
-            .or_insert_with(|| Value::String(pack_id.to_string()));
-    }
-    payload["config"] = cfg;
-    payload["msg"] = json!({
-        "channel": "setup",
-        "id": format!("{pack_id}.setup"),
-        "message": {
-            "id": format!("{pack_id}.setup_default__collect"),
-            "text": "Collect inputs for setup_default."
-        },
-        "metadata": {},
-        "reply_scope": "",
-        "session_id": "setup",
-        "tenant_id": tenant,
-        "text": "Collect inputs for setup_default.",
-        "user_id": "operator"
-    });
-    payload["payload"] = json!({
-        "id": format!("{pack_id}-setup_default"),
-        "spec_ref": "assets/setup.yaml"
-    });
-    payload["setup_answers"] = config.clone();
-    if let Ok(answers_str) = serde_json::to_string(config) {
-        payload["answers_json"] = Value::String(answers_str);
-    }
-    payload
-}
-
-fn resolve_gmap_path(
-    bundle_root: &std::path::Path,
-    tenant: &str,
-    team: Option<&str>,
-) -> std::path::PathBuf {
-    match team {
-        Some(team) if team != "_" => bundle_root
-            .join("tenants")
-            .join(tenant)
-            .join("teams")
-            .join(team)
-            .join("team.gmap"),
-        _ => bundle_root
-            .join("tenants")
-            .join(tenant)
-            .join("tenant.gmap"),
-    }
-}

@@ -6,7 +6,8 @@
 
 use std::path::Path;
 
-use qa_spec::spec::{Constraint, FormPresentation, ProgressPolicy};
+use qa_spec::convert::{capitalize, infer_question_properties};
+use qa_spec::spec::{FormPresentation, ProgressPolicy};
 use qa_spec::{FormSpec, QuestionSpec, QuestionType};
 
 use crate::setup_input::{SetupQuestion, SetupSpec, load_setup_spec};
@@ -118,39 +119,6 @@ fn convert_setup_question(q: &SetupQuestion) -> QuestionSpec {
 pub fn pack_to_form_spec(pack_path: &Path, provider_id: &str) -> Option<FormSpec> {
     let spec = load_setup_spec(pack_path).ok()??;
     Some(setup_spec_to_form_spec(&spec, provider_id))
-}
-
-/// Infer QuestionType, secret flag, and optional constraint from a question id.
-///
-/// Shared logic with `qa_bridge::infer_question_properties` — kept here to
-/// avoid circular dependency issues when qa_bridge is not yet activated.
-pub fn infer_question_properties(id: &str) -> (QuestionType, bool, Option<Constraint>) {
-    match id {
-        "enabled" => (QuestionType::Boolean, false, None),
-        id if id.ends_with("_url") || id == "public_base_url" || id == "api_base_url" => (
-            QuestionType::String,
-            false,
-            Some(Constraint {
-                pattern: Some(r"^https?://\S+".to_string()),
-                min: None,
-                max: None,
-                min_len: None,
-                max_len: None,
-            }),
-        ),
-        id if id.ends_with("_token") || id.contains("secret") || id.contains("password") => {
-            (QuestionType::String, true, None)
-        }
-        _ => (QuestionType::String, false, None),
-    }
-}
-
-fn capitalize(s: &str) -> String {
-    let mut chars = s.chars();
-    match chars.next() {
-        Some(c) => format!("{}{}", c.to_ascii_uppercase(), chars.as_str()),
-        None => String::new(),
-    }
 }
 
 #[cfg(test)]

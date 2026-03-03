@@ -9,6 +9,7 @@ use std::collections::{BTreeMap, HashMap};
 
 use qa_spec::{
     FormSpec, I18nText, QuestionSpec, QuestionType, ResolvedI18nMap,
+    convert::infer_question_properties,
     spec::{FormPresentation, ProgressPolicy},
 };
 use serde_json::Value;
@@ -150,30 +151,6 @@ fn convert_question(
         policy: Default::default(),
         computed_overridable: false,
     })
-}
-
-/// Infer QuestionType, secret flag, and optional constraint from a question id.
-pub fn infer_question_properties(
-    id: &str,
-) -> (QuestionType, bool, Option<qa_spec::spec::Constraint>) {
-    match id {
-        "enabled" => (QuestionType::Boolean, false, None),
-        id if id.ends_with("_url") || id == "public_base_url" || id == "api_base_url" => (
-            QuestionType::String,
-            false,
-            Some(qa_spec::spec::Constraint {
-                pattern: Some(r"^https?://\S+".to_string()),
-                min: None,
-                max: None,
-                min_len: None,
-                max_len: None,
-            }),
-        ),
-        id if id.ends_with("_token") || id.contains("secret") || id.contains("password") => {
-            (QuestionType::String, true, None)
-        }
-        _ => (QuestionType::String, false, None),
-    }
 }
 
 /// Return a sensible default for boolean questions.

@@ -5,6 +5,8 @@ use serde_json::{Value, json};
 use crate::domains::{self, Domain};
 use crate::operator_log;
 
+use qa_spec::convert::{capitalize, is_valid_identifier};
+
 use super::api::{OnboardState, error_response, json_ok};
 
 /// GET /api/onboard/providers
@@ -317,19 +319,3 @@ pub fn create_team(
     list_tenants(state)
 }
 
-/// Validate an identifier: non-empty, lowercase alphanumeric + hyphens, no leading/trailing hyphens.
-fn is_valid_identifier(s: &str) -> bool {
-    !s.is_empty()
-        && s.chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '-')
-        && !s.starts_with('-')
-        && !s.ends_with('-')
-}
-
-fn capitalize(s: &str) -> String {
-    let mut chars = s.chars();
-    match chars.next() {
-        Some(c) => format!("{}{}", c.to_ascii_uppercase(), chars.as_str()),
-        None => String::new(),
-    }
-}

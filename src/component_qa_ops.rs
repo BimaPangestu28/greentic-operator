@@ -12,24 +12,7 @@ use greentic_types::cbor::canonical;
 use greentic_types::decode_pack_manifest;
 use greentic_types::schemas::component::v0_6_0::ComponentQaSpec;
 
-#[derive(Debug, Clone, Copy, Eq, PartialEq)]
-pub enum QaMode {
-    Default,
-    Setup,
-    Upgrade,
-    Remove,
-}
-
-impl QaMode {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            QaMode::Default => "default",
-            QaMode::Setup => "setup",
-            QaMode::Upgrade => "upgrade",
-            QaMode::Remove => "remove",
-        }
-    }
-}
+pub use qa_spec::convert::QaMode;
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub enum QaDiagnosticCode {
