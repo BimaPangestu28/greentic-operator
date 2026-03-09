@@ -133,6 +133,9 @@ name = "arbitrary"
 version = "1.4.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c3d036a3c4ab069c7b410a2ce876bd74808d2d0888a82667669f8e783a898bf1"
+dependencies = [
+ "derive_arbitrary",
+]
 
 [[package]]
 name = "arc-swap"
@@ -1556,6 +1559,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "derive_arbitrary"
+version = "1.4.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1e567bd82dcff979e4b03460c307b3cdc9e96fde3d73bed1496d2bc75d9dd62a"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.117",
+]
+
+[[package]]
 name = "derive_builder"
 version = "0.20.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2303,6 +2317,7 @@ dependencies = [
  "greentic-runner-desktop",
  "greentic-runner-host",
  "greentic-secrets-lib",
+ "greentic-setup",
  "greentic-telemetry",
  "greentic-types",
  "http-body-util",
@@ -2331,7 +2346,7 @@ dependencies = [
  "unic-langid",
  "ureq",
  "uuid",
- "zip",
+ "zip 8.2.0",
 ]
 
 [[package]]
@@ -2363,7 +2378,7 @@ dependencies = [
  "tempfile",
  "time",
  "x509-parser",
- "zip",
+ "zip 8.2.0",
 ]
 
 [[package]]
@@ -2398,7 +2413,7 @@ dependencies = [
  "tokio",
  "tracing",
  "uuid",
- "zip",
+ "zip 8.2.0",
 ]
 
 [[package]]
@@ -2459,7 +2474,7 @@ dependencies = [
  "wasmtime",
  "wasmtime-environ",
  "wasmtime-wasi",
- "zip",
+ "zip 8.2.0",
 ]
 
 [[package]]
@@ -2571,6 +2586,24 @@ dependencies = [
  "serde_json",
  "sha2",
  "uuid",
+]
+
+[[package]]
+name = "greentic-setup"
+version = "0.4.0"
+dependencies = [
+ "anyhow",
+ "greentic-distributor-client",
+ "greentic-secrets-lib",
+ "qa-spec",
+ "rpassword",
+ "serde",
+ "serde_cbor",
+ "serde_json",
+ "serde_yaml_gtc",
+ "tokio",
+ "tracing",
+ "zip 2.4.2",
 ]
 
 [[package]]
@@ -7458,6 +7491,23 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.117",
+]
+
+[[package]]
+name = "zip"
+version = "2.4.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fabe6324e908f85a1c52063ce7aa26b68dcb7eb6dbc83a2d148403c9bc3eba50"
+dependencies = [
+ "arbitrary",
+ "crc32fast",
+ "crossbeam-utils",
+ "displaydoc",
+ "flate2",
+ "indexmap 2.13.0",
+ "memchr",
+ "thiserror 2.0.18",
+ "zopfli",
 ]
 
 [[package]]

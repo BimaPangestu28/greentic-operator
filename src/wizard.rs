@@ -2346,6 +2346,7 @@ mod tests {
             providers_remove: Vec::new(),
             tenants_remove: Vec::new(),
             access_changes: Vec::new(),
+            setup_answers: serde_json::Map::new(),
         };
         let plan = apply_create(&req, true).unwrap();
         assert_eq!(
@@ -2383,6 +2384,7 @@ mod tests {
             providers_remove: Vec::new(),
             tenants_remove: Vec::new(),
             access_changes: Vec::new(),
+            setup_answers: serde_json::Map::new(),
         };
         let _plan = apply_create(&req, true).unwrap();
         assert!(!bundle.exists());
@@ -2409,6 +2411,7 @@ mod tests {
             providers_remove: Vec::new(),
             tenants_remove: Vec::new(),
             access_changes: Vec::new(),
+            setup_answers: serde_json::Map::new(),
         };
         let plan = apply_create(&req, false).unwrap();
         let report = execute_create_plan(&plan, true).unwrap();
@@ -2444,6 +2447,7 @@ mod tests {
             providers_remove: Vec::new(),
             tenants_remove: Vec::new(),
             access_changes: Vec::new(),
+            setup_answers: serde_json::Map::new(),
         };
         let create_plan = apply_create(&create_req, false).unwrap();
         let _ = execute_create_plan(&create_plan, true).unwrap();
@@ -2465,6 +2469,7 @@ mod tests {
             providers_remove: Vec::new(),
             tenants_remove: Vec::new(),
             access_changes: Vec::new(),
+            setup_answers: serde_json::Map::new(),
         };
         let plan = apply_update(&req, false).unwrap();
         assert_eq!(plan.mode, "update");
@@ -2493,6 +2498,7 @@ mod tests {
             providers_remove: Vec::new(),
             tenants_remove: Vec::new(),
             access_changes: Vec::new(),
+            setup_answers: serde_json::Map::new(),
         };
         let create_plan = apply_create(&create_req, false).unwrap();
         let _ = execute_create_plan(&create_plan, true).unwrap();
@@ -2514,6 +2520,7 @@ mod tests {
                 allow_paths: Vec::new(),
             }],
             access_changes: Vec::new(),
+            setup_answers: serde_json::Map::new(),
         };
         let remove_plan = apply_remove(&remove_req, false).unwrap();
         let _ = execute_remove_plan(&remove_plan).unwrap();
@@ -2708,6 +2715,7 @@ mod tests {
                 tenant_id: "demo".to_string(),
                 team_id: None,
             }],
+            setup_answers: serde_json::Map::new(),
         };
         let normalized = normalize_request_for_plan(&request).unwrap();
         assert_eq!(normalized.packs_remove[0].pack_identifier, "sales-0_6_0");
@@ -2736,6 +2744,7 @@ mod tests {
             providers_remove: Vec::new(),
             tenants_remove: Vec::new(),
             access_changes: Vec::new(),
+            setup_answers: serde_json::Map::new(),
         };
         let plan = apply_remove(&request, false).unwrap();
         let report = execute_remove_plan(&plan).unwrap();
@@ -2764,6 +2773,7 @@ mod tests {
             providers_remove: Vec::new(),
             tenants_remove: Vec::new(),
             access_changes: Vec::new(),
+            setup_answers: serde_json::Map::new(),
         };
         let create_plan = apply_create(&create_request, false).unwrap();
         let _create_report = execute_create_plan(&create_plan, true).unwrap();
@@ -2790,6 +2800,7 @@ mod tests {
             providers_remove: Vec::new(),
             tenants_remove: Vec::new(),
             access_changes: Vec::new(),
+            setup_answers: serde_json::Map::new(),
         };
         let update_plan = apply_update(&update_request, false).unwrap();
         let _report = execute_update_plan(&update_plan, true).unwrap();
