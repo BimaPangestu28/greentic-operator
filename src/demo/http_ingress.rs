@@ -174,6 +174,16 @@ pub struct HttpIngressConfig {
     pub runner_host: Arc<DemoRunnerHost>,
     /// Optional directory containing built webchat SPA assets to serve.
     pub webchat_spa_dir: Option<PathBuf>,
+    /// Admin API context (tenant, env, bundle_root). None disables `/admin/*`.
+    pub admin_context: Option<AdminContext>,
+}
+
+/// Context needed to construct the admin API state.
+#[derive(Clone)]
+pub struct AdminContext {
+    pub tenant: String,
+    pub team: Option<String>,
+    pub env: String,
 }
 
 pub struct HttpIngressServer {
@@ -187,12 +197,22 @@ impl HttpIngressServer {
         let domains = config.domains;
         let runner_host = config.runner_host;
         let webchat_spa_dir = config.webchat_spa_dir.clone();
+        let admin_state = config.admin_context.map(|ctx| {
+            Arc::new(crate::admin_api::AdminState {
+                tls_config: greentic_setup::admin::tls::AdminTlsConfig::default(),
+                bundle_root: runner_host.bundle_root().to_path_buf(),
+                tenant: ctx.tenant,
+                team: ctx.team,
+                env: ctx.env,
+            })
+        });
         let state = Arc::new(HttpIngressState {
             runner_host,
             domains,
             webchat_spa_dir,
             bot_activities: BotActivityStore::default(),
             tg_form_store: TelegramFormStore::default(),
+            admin_state,
         });
         let (tx, rx) = oneshot::channel();
         let addr = config.bind_addr;
@@ -288,6 +308,7 @@ struct HttpIngressState {
     webchat_spa_dir: Option<PathBuf>,
     bot_activities: BotActivityStore,
     tg_form_store: TelegramFormStore,
+    admin_state: Option<Arc<crate::admin_api::AdminState>>,
 }
 
 async fn handle_request(
@@ -322,6 +343,16 @@ async fn handle_request_inner(
         path = %path,
         "http_ingress request"
     );
+
+    // Admin API routes: /admin/*
+    if path.starts_with("/admin") {
+        if let Some(ref admin) = state.admin_state {
+            return crate::admin_api::handle_admin_request(req, &path, admin)
+                .await
+                .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()));
+        }
+        return Err(error_response(StatusCode::NOT_FOUND, "admin API not enabled"));
+    }
 
     // Onboard API routes: /api/onboard/*
     if path.starts_with("/api/onboard") {

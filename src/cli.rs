@@ -2288,6 +2288,11 @@ impl DemoUpArgs {
             if start_result.is_ok() {
                 let ingress_secrets_handle =
                     secrets_gate::resolve_secrets_manager(&bundle, &tenant, self.team.as_deref())?;
+                let admin_ctx = Some(crate::demo::http_ingress::AdminContext {
+                    tenant: tenant.clone(),
+                    team: self.team.clone(),
+                    env: resolve_env(None),
+                });
                 match start_demo_ingress_server(
                     &bundle,
                     &discovery,
@@ -2297,6 +2302,7 @@ impl DemoUpArgs {
                     debug_enabled,
                     ingress_secrets_handle.clone(),
                     upgraded_state_store.clone(),
+                    admin_ctx,
                 ) {
                     Ok(server) => {
                         println!(
@@ -5613,6 +5619,7 @@ fn start_demo_ingress_server(
     debug_enabled: bool,
     secrets_handle: SecretsManagerHandle,
     state_store_override: Option<greentic_runner_host::storage::DynStateStore>,
+    admin_context: Option<crate::demo::http_ingress::AdminContext>,
 ) -> anyhow::Result<HttpIngressServer> {
     let addr = format!(
         "{}:{}",
@@ -5646,6 +5653,7 @@ fn start_demo_ingress_server(
         domains: domains.to_vec(),
         runner_host,
         webchat_spa_dir,
+        admin_context,
     })
 }
 
