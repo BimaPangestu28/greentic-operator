@@ -1,3 +1,4 @@
+pub mod admin_api;
 pub mod bin_resolver;
 pub mod capabilities;
 pub mod cards;
